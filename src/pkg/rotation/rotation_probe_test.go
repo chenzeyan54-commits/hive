@@ -1256,3 +1256,83 @@ func TestCopilotProbeUsesOnlyGetVerb(t *testing.T) {
 		}
 	}
 }
+
+// TestCopilotProber_TokenFromGhCLI covers the credential-resolution fallbacks:
+// with GH_TOKEN/GITHUB_TOKEN unset, the probe reads `gh auth token` (which
+// spends no model turn and no premium request) and uses it. Success yields the
+// usual unknown reading.
+func TestCopilotProber_TokenFromGhCLI(t *testing.T) {
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	fakeCLI(t, "gh", "test-token", 0)
+	body := `{"usageItems":[{"netQuantity":0,"grossQuantity":5,"discountQuantity":5}]}`
+	srv, _ := copilotBillingServer(t, "octo", http.StatusOK, http.StatusOK, body)
+	h := CopilotProber{ThresholdPct: 80, Username: "octo", BaseURL: srv.URL}.Probe(context.Background())
+	if !errors.Is(h.ProbeErr, errCopilotEntitlementUnknown) {
+		t.Errorf("ProbeErr = %v, want errCopilotEntitlementUnknown via gh-resolved token", h.ProbeErr)
+	}
+}
+
+// TestCopilotProber_TokenFromEnv covers the GITHUB_TOKEN environment fallback.
+func TestCopilotProber_TokenFromEnv(t *testing.T) {
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "test-token")
+	body := `{"usageItems":[{"netQuantity":0,"grossQuantity":5,"discountQuantity":5}]}`
+	srv, _ := copilotBillingServer(t, "octo", http.StatusOK, http.StatusOK, body)
+	h := CopilotProber{ThresholdPct: 80, Username: "octo", BaseURL: srv.URL}.Probe(context.Background())
+	if !errors.Is(h.ProbeErr, errCopilotEntitlementUnknown) {
+		t.Errorf("ProbeErr = %v, want errCopilotEntitlementUnknown via env token", h.ProbeErr)
+	}
+}
+
+// TestCopilotProber_EmptyGhToken covers the guard for a gh CLI that succeeds but
+// prints nothing (still a needs-login state).
+func TestCopilotProber_EmptyGhToken(t *testing.T) {
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	fakeCLI(t, "gh", "", 0)
+	h := CopilotProber{ThresholdPct: 80, BaseURL: "http://127.0.0.1:1"}.Probe(context.Background())
+	if h.ProbeErr == nil || !strings.Contains(h.ProbeErr.Error(), "needs login") {
+		t.Errorf("ProbeErr = %v, want a needs-login error on an empty gh token", h.ProbeErr)
+	}
+}
+
+// TestCopilotProber_ServerErrorIsUnknown covers the default (non-OK, non-auth)
+// HTTP status branch: a 500 fails open as unknown, never a permissive reading.
+func TestCopilotProber_ServerErrorIsUnknown(t *testing.T) {
+	srv, _ := copilotBillingServer(t, "octo", http.StatusOK, http.StatusInternalServerError, "")
+	h := CopilotProber{ThresholdPct: 80, Token: "test-token", Username: "octo", BaseURL: srv.URL}.Probe(context.Background())
+	if h.ProbeErr == nil || !h.Available {
+		t.Error("want fail-open unknown on a 500 from the billing endpoint")
+	}
+	if !strings.Contains(h.ProbeErr.Error(), "500") {
+		t.Errorf("ProbeErr = %v, want it to name the 500", h.ProbeErr)
+	}
+}
+
+// TestCopilotTokenLogin_Errors covers copilotTokenLogin's edge cases reached via
+// an empty Username: an empty login field and a malformed /user body both
+// surface as explicit errors (needs-login / unrecognized schema), never a
+// permissive reading.
+func TestCopilotTokenLogin_Errors(t *testing.T) {
+	// 200 with an empty login -> explicit "no login" error.
+	srvEmpty, _ := copilotBillingServer(t, "", http.StatusOK, http.StatusOK, "{}")
+	h := CopilotProber{ThresholdPct: 80, Token: "test-token", BaseURL: srvEmpty.URL}.Probe(context.Background())
+	if h.ProbeErr == nil || !h.Available {
+		t.Error("want fail-open unknown when /user carries no login")
+	}
+
+	// 200 with malformed JSON -> unmarshal error.
+	srvBad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/user" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{not json`))
+	}))
+	t.Cleanup(srvBad.Close)
+	h = CopilotProber{ThresholdPct: 80, Token: "test-token", BaseURL: srvBad.URL}.Probe(context.Background())
+	if h.ProbeErr == nil || !h.Available {
+		t.Error("want fail-open unknown when /user body is malformed")
+	}
+}
