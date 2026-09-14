@@ -1,0 +1,20 @@
+{
+  "usageItems": [
+    {
+      "product": "copilot",
+      "sku": "copilot_premium_requests",
+      "model": "gpt-5",
+      "grossQuantity": 180,
+      "discountQuantity": 180,
+      "netQuantity": 0
+    },
+    {
+      "product": "copilot",
+      "sku": "copilot_premium_requests",
+      "model": "claude-opus-4",
+      "grossQuantity": 140,
+      "discountQuantity": 120,
+      "netQuantity": 20
+    }
+  ]
+}

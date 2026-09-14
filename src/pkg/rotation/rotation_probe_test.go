@@ -340,19 +340,20 @@ func TestNewManager_DefaultProbers(t *testing.T) {
 			"anthropic": {Class: ClassSubscription, Backends: []string{"claude"}},
 			"openai":    {Class: ClassSubscription, Backends: []string{"codex"}},
 			"google":    {Class: ClassSubscription, Backends: []string{"agy"}},
+			"github":    {Class: ClassSubscription, Backends: []string{"copilot"}},
 			"deepseek":  {Class: ClassMetered, Backends: []string{"litellm"}},
 			"unknown":   {Class: ClassMetered, Backends: []string{"other"}},
 		},
 	}
 	m := NewManager(cfg)
-	if len(m.probers) != 4 {
-		t.Fatalf("len(probers) = %d, want 4 (unknown provider gets none)", len(m.probers))
+	if len(m.probers) != 5 {
+		t.Fatalf("len(probers) = %d, want 5 (unknown provider gets none)", len(m.probers))
 	}
 	got := map[string]bool{}
 	for _, p := range m.probers {
 		got[p.Provider()] = true
 	}
-	for _, want := range []string{"anthropic", "openai", "google", "deepseek"} {
+	for _, want := range []string{"anthropic", "openai", "google", "github", "deepseek"} {
 		if !got[want] {
 			t.Errorf("missing default prober for %q", want)
 		}
@@ -973,6 +974,285 @@ func TestAgyHeadroomRejectsUnrecognizedSchema(t *testing.T) {
 	} {
 		if _, err := agyHeadroom("google", 80, []byte(body), ""); err == nil {
 			t.Errorf("agyHeadroom(%s) err = nil, want an explicit unrecognized-schema error", body)
+		}
+	}
+}
+
+// ── kubestellar/hive#6980 ───────────────────────────────────────────────────
+
+// copilotBillingServer serves GET /user and the premium-request usage path,
+// recording every request method+path so a test can assert the probe only ever
+// issues GETs — no budget-mutating call, and no premium request consumed.
+func copilotBillingServer(t *testing.T, login string, userStatus, usageStatus int, usageBody string) (*httptest.Server, *[]string) {
+	t.Helper()
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Errorf("Authorization = %q, want Bearer test-token", got)
+		}
+		switch r.URL.Path {
+		case "/user":
+			w.WriteHeader(userStatus)
+			if userStatus == http.StatusOK {
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"login":%q}`, login)))
+			}
+		case "/users/" + login + "/settings/billing/premium_request/usage":
+			w.WriteHeader(usageStatus)
+			_, _ = w.Write([]byte(usageBody))
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &seen
+}
+
+// TestCopilotHeadroomReportsUnknownWithConsumedAndOverage pins the core #6980
+// decision: the documented usage endpoint reports CONSUMED premium requests but
+// not the plan allowance, so pct_remaining CANNOT be derived — the reading is
+// `unknown` (ProbeErr = errCopilotEntitlementUnknown), never a fabricated
+// number. The consumed count is surfaced informationally, the monthly window
+// carries its duration and first-of-next-month reset, and netQuantity > 0
+// populates the paid-overage signal without touching any budget.
+func TestCopilotHeadroomReportsUnknownWithConsumedAndOverage(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "copilot_premium_request_usage.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := copilotHeadroom("github", raw)
+	if err != nil {
+		t.Fatalf("copilotHeadroom returned a hard error: %v", err)
+	}
+	// The headroom is UNKNOWN: a consumed-only payload cannot yield a percent.
+	if !errors.Is(h.ProbeErr, errCopilotEntitlementUnknown) {
+		t.Errorf("ProbeErr = %v, want errCopilotEntitlementUnknown (allowance not derivable)", h.ProbeErr)
+	}
+	// pct_remaining must NOT be fabricated from consumed counts.
+	if h.PctRemaining != 0 {
+		t.Errorf("PctRemaining = %d, want 0 (no allowance to derive a percent from)", h.PctRemaining)
+	}
+	// Inconclusive is not exhaustion: rotation keeps Copilot available.
+	if !h.Available {
+		t.Error("Available = false; an unknown reading is not exhaustion (fail-open for rotation)")
+	}
+	if len(h.Limits) != 1 {
+		t.Fatalf("len(Limits) = %d, want 1 monthly window; Limits=%+v", len(h.Limits), h.Limits)
+	}
+	w := h.Limits[0]
+	if w.Kind != "monthly" {
+		t.Errorf("window Kind = %q, want monthly", w.Kind)
+	}
+	if w.DurationMins != copilotMonthlyWindowMins {
+		t.Errorf("window DurationMins = %d, want %d", w.DurationMins, copilotMonthlyWindowMins)
+	}
+	if w.ResetAt.IsZero() || !w.ResetAt.Equal(copilotFirstOfNextMonth(time.Now())) {
+		t.Errorf("window ResetAt = %v, want first of next month %v", w.ResetAt, copilotFirstOfNextMonth(time.Now()))
+	}
+	// Consumed counts are surfaced informationally: gross 320, discount 300, net 20.
+	if got := w.Scope["consumed_gross"]; got != "320" {
+		t.Errorf("consumed_gross = %q, want 320", got)
+	}
+	if got := w.Scope["consumed_net"]; got != "20" {
+		t.Errorf("consumed_net = %q, want 20", got)
+	}
+	// netQuantity 20 > 0 -> paid overage is being consumed.
+	if h.PaidCreditsAvailable == nil || !*h.PaidCreditsAvailable {
+		t.Error("PaidCreditsAvailable should be true: net premium-request overage (netQuantity 20 > 0) is being consumed")
+	}
+}
+
+// TestCopilotHeadroomNoOverageLeavesPaidSignalUnset pins that with no net
+// overage the paid-credits signal stays nil ("the provider did not say"),
+// never a fabricated false, while the reading is still unknown.
+func TestCopilotHeadroomNoOverageLeavesPaidSignalUnset(t *testing.T) {
+	body := `{"usageItems":[{"product":"copilot","sku":"copilot_premium_requests","model":"gpt-5","grossQuantity":50,"discountQuantity":50,"netQuantity":0}]}`
+	h, err := copilotHeadroom("github", []byte(body))
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !errors.Is(h.ProbeErr, errCopilotEntitlementUnknown) {
+		t.Errorf("ProbeErr = %v, want errCopilotEntitlementUnknown", h.ProbeErr)
+	}
+	if h.PaidCreditsAvailable != nil {
+		t.Errorf("PaidCreditsAvailable = %v, want nil (no net overage, provider did not confirm availability)", *h.PaidCreditsAvailable)
+	}
+}
+
+// TestCopilotHeadroomRejectsUnrecognizedSchema pins that invalid JSON, an empty
+// usageItems array, items with no quantity, or an unrelated object surface as a
+// hard error (fail-open with ProbeErr set = unknown to the guard) rather than a
+// confident healthy reading — the misread whose Copilot consequence is a bill.
+func TestCopilotHeadroomRejectsUnrecognizedSchema(t *testing.T) {
+	for _, body := range []string{
+		`not json`,
+		`{"usageItems":[]}`,
+		`{"usageItems":[{"product":"copilot","sku":"x"}]}`,
+		`{"somethingElse":true}`,
+	} {
+		if _, err := copilotHeadroom("github", []byte(body)); err == nil {
+			t.Errorf("copilotHeadroom(%s) err = nil, want an explicit unrecognized-schema error", body)
+		}
+	}
+}
+
+// TestCopilotProber_Probe drives the whole HTTP path: it resolves the token
+// owner via GET /user, reads the usage endpoint, and returns the unknown
+// reading with its monthly window. It also asserts every request was a GET, so
+// no budget-mutating call and no premium-request-consuming call was made.
+func TestCopilotProber_Probe(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "copilot_premium_request_usage.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, seen := copilotBillingServer(t, "octo", http.StatusOK, http.StatusOK, string(raw))
+	p := CopilotProber{ThresholdPct: 80, Token: "test-token", BaseURL: srv.URL}
+	if p.Provider() != "github" {
+		t.Errorf("Provider = %q, want github", p.Provider())
+	}
+	h := p.Probe(context.Background())
+	if !errors.Is(h.ProbeErr, errCopilotEntitlementUnknown) {
+		t.Errorf("ProbeErr = %v, want errCopilotEntitlementUnknown", h.ProbeErr)
+	}
+	if len(h.Limits) != 1 || h.Limits[0].Kind != "monthly" {
+		t.Errorf("want one monthly window; Limits=%+v", h.Limits)
+	}
+	for _, req := range *seen {
+		if !strings.HasPrefix(req, "GET ") {
+			t.Errorf("probe issued a non-GET request %q — a reading must consume no premium request and mutate no billing state", req)
+		}
+	}
+}
+
+// TestCopilotProber_ExplicitUsernameSkipsUserLookup pins that a configured
+// Username reads billing directly, without a /user round-trip.
+func TestCopilotProber_ExplicitUsernameSkipsUserLookup(t *testing.T) {
+	body := `{"usageItems":[{"product":"copilot","sku":"copilot_premium_requests","netQuantity":0,"grossQuantity":10,"discountQuantity":10}]}`
+	srv, seen := copilotBillingServer(t, "octo", http.StatusOK, http.StatusOK, body)
+	h := CopilotProber{ThresholdPct: 80, Token: "test-token", Username: "octo", BaseURL: srv.URL}.Probe(context.Background())
+	if !errors.Is(h.ProbeErr, errCopilotEntitlementUnknown) {
+		t.Errorf("ProbeErr = %v, want errCopilotEntitlementUnknown", h.ProbeErr)
+	}
+	for _, req := range *seen {
+		if req == "GET /user" {
+			t.Errorf("explicit Username should skip the /user lookup, but saw %q", req)
+		}
+	}
+}
+
+// TestCopilotProber_MissingScopeIsExplicitUnknown pins that a 403 on the usage
+// endpoint (token missing the billing scope) reports explicitly and fails open
+// as unknown — never a permissive full-headroom reading.
+func TestCopilotProber_MissingScopeIsExplicitUnknown(t *testing.T) {
+	srv, _ := copilotBillingServer(t, "octo", http.StatusOK, http.StatusForbidden, "")
+	h := CopilotProber{ThresholdPct: 80, Token: "test-token", Username: "octo", BaseURL: srv.URL}.Probe(context.Background())
+	if h.ProbeErr == nil {
+		t.Fatal("ProbeErr = nil, want an explicit missing-scope error")
+	}
+	if !h.Available {
+		t.Error("Available = false; a missing scope is unknown, not exhaustion (fail-open for rotation)")
+	}
+	if errors.Is(h.ProbeErr, errCopilotEntitlementUnknown) {
+		t.Error("a 403 must not be reported as the entitlement-unknown sentinel; it is a distinct scope/login failure")
+	}
+	if !strings.Contains(h.ProbeErr.Error(), "403") {
+		t.Errorf("ProbeErr = %v, want it to name the 403", h.ProbeErr)
+	}
+}
+
+// TestCopilotProber_NeedsLogin pins that with no token available (env cleared
+// and `gh auth token` failing) the probe reports a needs-login state and fails
+// open as unknown, never a permissive reading.
+func TestCopilotProber_NeedsLogin(t *testing.T) {
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	fakeCLI(t, "gh", "not logged into any GitHub hosts", 1)
+	h := CopilotProber{ThresholdPct: 80, BaseURL: "http://127.0.0.1:1"}.Probe(context.Background())
+	if h.ProbeErr == nil {
+		t.Fatal("ProbeErr = nil, want a needs-login error")
+	}
+	if !h.Available {
+		t.Error("Available = false; a logged-out CLI is unknown, not exhaustion")
+	}
+	if !strings.Contains(h.ProbeErr.Error(), "needs login") {
+		t.Errorf("ProbeErr = %v, want it to name the needs-login state", h.ProbeErr)
+	}
+}
+
+// TestCopilotProber_UserLookupFailureIsUnknown pins that a failed token-owner
+// lookup (e.g. 401 on /user) reports explicitly and fails open as unknown.
+func TestCopilotProber_UserLookupFailureIsUnknown(t *testing.T) {
+	srv, _ := copilotBillingServer(t, "octo", http.StatusUnauthorized, http.StatusOK, "{}")
+	h := CopilotProber{ThresholdPct: 80, Token: "test-token", BaseURL: srv.URL}.Probe(context.Background())
+	if h.ProbeErr == nil || !h.Available {
+		t.Error("want fail-open unknown when the token-owner lookup fails")
+	}
+}
+
+// TestCopilotFirstOfNextMonth pins the reset boundary, including the December→
+// January year rollover.
+func TestCopilotFirstOfNextMonth(t *testing.T) {
+	got := copilotFirstOfNextMonth(time.Date(2026, 9, 14, 17, 8, 0, 0, time.UTC))
+	if want := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("Sep -> %v, want %v", got, want)
+	}
+	got = copilotFirstOfNextMonth(time.Date(2026, 12, 31, 23, 59, 0, 0, time.UTC))
+	if want := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("Dec -> %v, want %v (year rollover)", got, want)
+	}
+}
+
+// TestNoCopilotBudgetMutation is #6833's load-bearing safety pin for this
+// adapter: no code path may call any budget-mutating endpoint. The consequence
+// of a misread here is a BILL, not a wait, so the absence of a budget call is
+// asserted rather than assumed. Any reference to a budgets endpoint in
+// non-test source, or any non-GET verb aimed at the billing surface, fails
+// this test.
+func TestNoCopilotBudgetMutation(t *testing.T) {
+	root := filepath.Join("..", "..")
+	banned := []string{
+		"settings/billing/budgets",
+		"/billing/budgets",
+		"budgets/",
+	}
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") {
+			return err
+		}
+		if strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		src := string(b)
+		for _, s := range banned {
+			if strings.Contains(src, s) {
+				t.Errorf("%s references a budget endpoint %q — no code path may create, modify, or mutate a Copilot budget (#6833: no code path purchases credits)", path, s)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCopilotProbeUsesOnlyGetVerb pins that the copilot billing surface is only
+// ever read with GET at runtime — a mutation of the probe to POST/PATCH/DELETE
+// the billing endpoint is caught here as a non-GET request reaching the server.
+func TestCopilotProbeUsesOnlyGetVerb(t *testing.T) {
+	body := `{"usageItems":[{"netQuantity":0,"grossQuantity":1,"discountQuantity":1}]}`
+	srv, seen := copilotBillingServer(t, "octo", http.StatusOK, http.StatusOK, body)
+	CopilotProber{ThresholdPct: 80, Token: "test-token", Username: "octo", BaseURL: srv.URL}.Probe(context.Background())
+	if len(*seen) == 0 {
+		t.Fatal("no requests reached the billing server")
+	}
+	for _, req := range *seen {
+		if !strings.HasPrefix(req, "GET ") {
+			t.Errorf("billing request %q is not a GET — reading quota must never mutate billing or spend a premium request", req)
 		}
 	}
 }

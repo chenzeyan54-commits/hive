@@ -73,3 +73,28 @@ exists today; it does not prove the field set is complete across tiers, and a
 different tier may expose groups or fields this capture does not. The adapter's
 behaviour on an unrecognized schema is pinned separately and independently by
 `TestAgyHeadroomRejectsUnrecognizedSchema`.
+
+# Copilot premium-request usage fixture
+
+`copilot_premium_request_usage.json` is a response body of the enhanced billing
+platform endpoint `GET /users/{username}/settings/billing/premium_request/usage`
+that `CopilotProber` consumes (kubestellar/hive#6980). It carries a `usageItems`
+array with two rows — one fully covered by the plan discount (`netQuantity` 0)
+and one that has rolled into paid overage (`netQuantity` 20) — so the fixture
+exercises the consumed-count aggregation (gross 320, discount 300, net 20) and
+the `netQuantity > 0` paid-overage signal. Crucially it carries **no** allowance
+or `remaining` field, because the real endpoint does not: the adapter therefore
+reports the headroom as `unknown` and surfaces the consumed count
+informationally rather than deriving a `pct_remaining` it cannot know.
+
+Provenance note: this fixture is **schema-derived from the field names #6980
+documents (`usageItems` with `grossQuantity` / `discountQuantity` /
+`netQuantity` per product/sku/model), NOT captured from a live Copilot billing
+account** — this working tree has no Copilot billing token, so no real payload
+was obtainable. The exact JSON nesting/spelling is a best-effort instance of the
+documented shape rather than a redacted real capture; when a real recorded
+payload becomes available it should replace this file and the parser field tags
+should be reconciled with it. The adapter's behaviour on an unrecognized schema
+is pinned separately and independently of these details by
+`TestCopilotHeadroomRejectsUnrecognizedSchema`, and the `unknown` outcome holds
+regardless of the accepted-shape field spellings.

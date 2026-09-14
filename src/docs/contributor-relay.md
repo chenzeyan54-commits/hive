@@ -858,6 +858,54 @@ not "fix" an adapter back to a source that was deliberately rejected:
   `num_turns: 0` and `usage.total_tokens: 0`, so a reading consumes no model
   turn — verified rather than argued.
 
+- **Copilot** — the documented enhanced billing platform endpoint
+  `GET /users/{username}/settings/billing/premium_request/usage`
+  ([#6980](https://github.com/hivecommons/hive/issues/6980)). Three source
+  properties are decided and recorded here so a later reader does not "fix" them:
+
+  - **Data source & the `unknown` outcome.** The usage endpoint reports
+    *consumed* premium requests for the month (`grossQuantity` /
+    `discountQuantity` / `netQuantity` per product/sku/model) but **not** the
+    plan's allowance, so `pct_remaining` cannot be derived from it alone. Three
+    other sources were rejected: the Copilot CLI has no documented
+    non-interactive usage output (its interactive display is decorative text
+    #6833 rules out); the undocumented endpoint the IDE clients poll is not a
+    supported machine-readable surface, so the adapter does **not** read it; and
+    `~/.copilot/session-state/*/events.jsonl` (already read by
+    `detectCopilotModel`) carries only model-selection fields, not
+    premium-request accounting — verified before the network call was added.
+    So the adapter is honest about the gap: it reports **`unknown`** for the
+    headroom (a probe error the guard holds on, never a fabricated percentage)
+    while surfacing the consumed count informationally. Reporting a confident
+    number off a consumed-only payload is the misread whose Copilot consequence
+    is a bill, not a wait.
+
+  - **Monthly window governed by the base reserve.** Copilot's unit is a count
+    of premium requests per calendar **month** with a reset on the first of the
+    month — there are no rolling five-hour/weekly windows. Rather than teach the
+    relay a new `monthly` reserve override (a JS behaviour change #6980 stays
+    out of), Copilot is governed by the **base reserve only**: the emitted
+    window carries `kind: monthly`, which the guard evaluates against the
+    default reserve and holds as `guarded_unknown_window`. So
+    `HIVE_CONTRIBUTOR_QUOTA_SHORT_MIN_REMAINING_PCT` /
+    `HIVE_CONTRIBUTOR_QUOTA_WEEKLY_MIN_REMAINING_PCT` do **not** apply to it;
+    only `HIVE_CONTRIBUTOR_QUOTA_MIN_REMAINING_PCT` does. The window carries its
+    duration and a `ResetAt` of the first of next month so the terminal message
+    can show reset timing.
+
+  - **Paid overage, read never enabled.** `netQuantity > 0` is a documented
+    direct signal that paid overage is already being consumed; it populates the
+    paid-overage flag. The adapter never creates, modifies, or mutates a budget
+    — it touches no budget-mutating endpoint at all — and a test
+    (`TestNoCopilotBudgetMutation`) asserts no code path does, per #6833's "no
+    code path purchases credits". Missing token scope, a logged-out CLI (a
+    `gh auth token` / `GET /user` failure), or an unrecognized schema is
+    reported explicitly and enters the unknown-data behaviour — no silent
+    fallback to a permissive reading. Obtaining a reading is a plain
+    authenticated GET, so it consumes no model turn and no premium request. The
+    accepted-payload shape is schema-derived, not a live capture, and ships
+    reporting `unknown` until a real recorded payload replaces the fixture.
+
 
 
 When the guard holds a *pushed* assignment (rather than merely withholding

@@ -893,6 +893,313 @@ func agyHeadroom(provider string, thresholdPct int, body []byte, model string) (
 	}, nil
 }
 
+// copilotUsageAPIVersion pins the REST API version header the enhanced billing
+// platform expects, matching the rest of hive's `gh api` calls.
+const copilotUsageAPIVersion = "2022-11-28"
+
+// copilotMonthlyWindowMins is the fixed length reported for Copilot's premium
+// request window. Copilot's unit is a count of premium requests per CALENDAR
+// month, not a rolling window, so unlike the five-hour/weekly probers there is
+// no provider-stated duration to band from — the window is anchored to the
+// month boundary and its reset is the first of next month (see
+// copilotFirstOfNextMonth). 30 days keeps the reading's DurationMins member
+// populated and lands `monthly` outside codexWindowKind's known bands, which is
+// deliberate: the relay evaluates an unrecognized kind against the base reserve
+// (kubestellar/hive#6951), which is exactly the governance decision this
+// adapter records — Copilot is held by the base reserve, not a five-hour or
+// weekly override.
+const copilotMonthlyWindowMins = 30 * 24 * 60
+
+// errCopilotEntitlementUnknown is the sentinel a successful billing read still
+// carries: the documented usage endpoint reports CONSUMED premium requests but
+// never the plan allowance, so `pct_remaining` cannot be derived from it and
+// the honest reading is `unknown` (kubestellar/hive#6980). It is a ProbeErr —
+// so the contributor guard holds rather than admitting on a fabricated
+// headroom, and rotation does not treat Copilot as exhausted — while the
+// reading still carries the consumed count and the paid-overage signal
+// informationally for the terminal message. A guard that silently reported
+// full headroom off a consumed-only payload is the misread whose Copilot
+// consequence is a bill, not a wait, which #6833 exists to prevent.
+var errCopilotEntitlementUnknown = errors.New("copilot premium-request usage: plan allowance is not exposed by the billing API; pct_remaining is unknown")
+
+// CopilotProber probes GitHub Copilot premium-request usage via the documented
+// enhanced billing platform REST endpoint.
+//
+// SOURCE DECISION (kubestellar/hive#6980): the only documented machine-readable
+// surface for Copilot premium-request accounting is
+//
+//	GET /users/{username}/settings/billing/premium_request/usage
+//
+// which reports CONSUMED premium requests for the month (grossQuantity /
+// discountQuantity / netQuantity per product/sku/model). It does NOT report the
+// plan's allowance or any `remaining`, so a `pct_remaining` cannot be derived
+// from it alone. Three other candidate sources were considered and rejected:
+// the Copilot CLI has no documented non-interactive usage output (its
+// interactive display is decorative text #6833 rules out, the same ruling #6966
+// applied to Agy's `/usage`); the undocumented endpoint the IDE clients poll is
+// not a supported machine-readable surface, so this adapter does not read it;
+// and `~/.copilot/session-state/*/events.jsonl` (already read by
+// detectCopilotModel) carries only model-selection fields, not premium-request
+// accounting — verified before adding this network call.
+//
+// So this adapter is HONEST about the gap: it reads the documented endpoint,
+// surfaces the consumed count and the paid-overage signal (netQuantity > 0, a
+// documented direct signal that paid overage is being consumed), and reports
+// `unknown` for the headroom rather than fabricating a percentage. Reporting a
+// confident number off a consumed-only payload is the misread whose Copilot
+// consequence is a bill, not a wait.
+//
+// WINDOW SHAPE DECISION (kubestellar/hive#6980): Copilot's unit is a count of
+// premium requests per calendar month with a reset on the first of the month —
+// there are no rolling five-hour/weekly windows. Rather than teach the relay a
+// new `monthly` reserve override (which would be a JS behaviour change this
+// issue explicitly stays out of), Copilot is governed by the BASE reserve: the
+// emitted window carries kind `monthly`, which the relay evaluates against the
+// default reserve and holds as `guarded_unknown_window`
+// (kubestellar/hive#6951). This is recorded in src/docs/contributor-relay.md.
+//
+// Obtaining a reading is a plain authenticated GET — it sends no model prompt
+// and consumes no premium request. Reading a budget's state would be equally
+// passive, but this adapter never touches any budget-mutating endpoint at all
+// (pinned by TestNoCopilotBudgetMutation), so #6833's "no code path purchases
+// credits" holds by construction.
+//
+// PROVENANCE CAVEAT: the JSON shape copilotHeadroom parses is derived from the
+// field names #6980 documents (`usageItems` with `grossQuantity` /
+// `discountQuantity` / `netQuantity` per product/sku/model), NOT from a live
+// Copilot billing capture — this working tree has no Copilot billing token. The
+// reject-unrecognized-schema path is fully verified; the accepted-shape details
+// must be validated against a real payload and the fixture replaced. See
+// testdata/README.md.
+type CopilotProber struct {
+	ThresholdPct int
+	// Username is the GitHub login whose billing usage is read. Empty falls
+	// back to the token owner via GET {BaseURL}/user.
+	Username string
+	// Token is the GitHub token. Empty falls back to GH_TOKEN / GITHUB_TOKEN
+	// and then `gh auth token`. A missing token is a needs-login state, not a
+	// permissive reading.
+	Token string
+	// BaseURL overrides the API host (tests). Default production api.github.com.
+	BaseURL string
+	// Client overrides the HTTP client (tests).
+	Client *http.Client
+}
+
+const copilotBaseURL = "https://api.github.com"
+
+// copilotUsageItem is one row of the premium-request usage report. Every
+// quantity is a count of premium requests for the month; netQuantity is gross
+// minus the plan-included discount, so netQuantity > 0 is paid overage.
+type copilotUsageItem struct {
+	Product          string   `json:"product"`
+	SKU              string   `json:"sku"`
+	Model            string   `json:"model"`
+	GrossQuantity    *float64 `json:"grossQuantity"`
+	DiscountQuantity *float64 `json:"discountQuantity"`
+	NetQuantity      *float64 `json:"netQuantity"`
+}
+
+type copilotUsageResponse struct {
+	UsageItems []copilotUsageItem `json:"usageItems"`
+}
+
+func (p CopilotProber) Provider() string { return "github" }
+
+func (p CopilotProber) Probe(ctx context.Context) Headroom {
+	token := p.Token
+	if token == "" {
+		token = os.Getenv("GH_TOKEN")
+	}
+	if token == "" {
+		token = os.Getenv("GITHUB_TOKEN")
+	}
+	if token == "" {
+		// `gh auth token` prints the stored credential without spending a model
+		// turn or a premium request. Its failure is a logged-out CLI, which is
+		// a needs-login state — reported explicitly, never a permissive reading.
+		out, err := runCLI(ctx, "gh", "auth", "token")
+		if err != nil {
+			return failOpen(p.Provider(), fmt.Errorf("copilot: no GitHub token (needs login): %w", err))
+		}
+		token = strings.TrimSpace(out)
+	}
+	if token == "" {
+		return failOpen(p.Provider(), errors.New("copilot: no GitHub token (needs login)"))
+	}
+	base := p.BaseURL
+	if base == "" {
+		base = copilotBaseURL
+	}
+	client := p.Client
+	if client == nil {
+		client = &http.Client{Timeout: probeTimeout}
+	}
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+
+	username := p.Username
+	if username == "" {
+		login, err := copilotTokenLogin(ctx, client, base, token)
+		if err != nil {
+			return failOpen(p.Provider(), err)
+		}
+		username = login
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/users/"+username+"/settings/billing/premium_request/usage", nil)
+	if err != nil {
+		return failOpen(p.Provider(), err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", copilotUsageAPIVersion)
+	resp, err := client.Do(req)
+	if err != nil {
+		return failOpen(p.Provider(), err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		// handled below
+	case http.StatusUnauthorized, http.StatusForbidden:
+		// A missing token scope (the `Manage billing` / read scope the enhanced
+		// billing platform requires) reports explicitly and enters the
+		// unknown-data behaviour — never a permissive full-headroom reading.
+		return failOpen(p.Provider(), fmt.Errorf("copilot billing usage HTTP %d (token missing billing scope, or needs login)", resp.StatusCode))
+	default:
+		return failOpen(p.Provider(), fmt.Errorf("copilot billing usage HTTP %d", resp.StatusCode))
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return failOpen(p.Provider(), err)
+	}
+	h, err := copilotHeadroom(p.Provider(), body)
+	if err != nil {
+		return failOpen(p.Provider(), err)
+	}
+	return h
+}
+
+// copilotTokenLogin resolves the token owner's login via GET {base}/user so the
+// billing path can be built. A failure here is a needs-login / missing-scope
+// state, reported explicitly rather than read as headroom.
+func copilotTokenLogin(ctx context.Context, client *http.Client, base, token string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/user", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", copilotUsageAPIVersion)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("copilot: GET /user HTTP %d (needs login)", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if err != nil {
+		return "", err
+	}
+	var u struct {
+		Login string `json:"login"`
+	}
+	if err := json.Unmarshal(body, &u); err != nil {
+		return "", err
+	}
+	if u.Login == "" {
+		return "", errors.New("copilot: GET /user carried no login (unrecognized schema)")
+	}
+	return u.Login, nil
+}
+
+// copilotFirstOfNextMonth returns the UTC first-of-next-month instant relative
+// to now: the reset boundary of Copilot's monthly premium-request allowance, so
+// the emitted window carries the ResetAt the guard's terminal message shows.
+func copilotFirstOfNextMonth(now time.Time) time.Time {
+	y, m, _ := now.UTC().Date()
+	return time.Date(y, m, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 1, 0)
+}
+
+// copilotHeadroom builds a normalized reading from a premium-request usage
+// payload (kubestellar/hive#6980).
+//
+// Like the other three adapters it reports an error rather than a permissive
+// reading whenever the payload carries nothing it recognizes — invalid JSON, or
+// no usage item carrying any quantity. That surfaces as unknown so the caller
+// enters the configured unknown-data behaviour: a guard that silently reported
+// full headroom off an unrecognized schema is worse than no guard.
+//
+// On a recognized payload it still cannot derive `pct_remaining` (the endpoint
+// carries no allowance), so the returned Headroom carries the
+// errCopilotEntitlementUnknown sentinel as its ProbeErr — the guard holds on
+// unknown rather than admitting — while surfacing the consumed count and the
+// paid-overage signal (netQuantity > 0) informationally, and emitting the
+// monthly window with its duration and first-of-next-month reset.
+func copilotHeadroom(provider string, body []byte) (Headroom, error) {
+	var parsed copilotUsageResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return Headroom{}, err
+	}
+	var gross, discount, net float64
+	recognized := false
+	for _, it := range parsed.UsageItems {
+		if it.GrossQuantity == nil && it.DiscountQuantity == nil && it.NetQuantity == nil {
+			// A row with no quantity at all carries no usable reading; it must
+			// not be counted as zero consumption.
+			continue
+		}
+		recognized = true
+		if it.GrossQuantity != nil {
+			gross += *it.GrossQuantity
+		}
+		if it.DiscountQuantity != nil {
+			discount += *it.DiscountQuantity
+		}
+		if it.NetQuantity != nil {
+			net += *it.NetQuantity
+		}
+	}
+	if !recognized {
+		return Headroom{}, errors.New("copilot premium-request usage: no usage item carried a quantity (unrecognized schema)")
+	}
+
+	reset := copilotFirstOfNextMonth(time.Now())
+	// The consumed counts are surfaced informationally in the window scope so
+	// the terminal message can show them; they are NOT a pct_remaining.
+	window := LimitWindow{
+		ID:           "monthly_premium_requests",
+		Kind:         "monthly",
+		DurationMins: copilotMonthlyWindowMins,
+		ResetAt:      reset,
+		Scope: map[string]string{
+			"consumed_gross":    strconv.FormatFloat(gross, 'f', -1, 64),
+			"consumed_discount": strconv.FormatFloat(discount, 'f', -1, 64),
+			"consumed_net":      strconv.FormatFloat(net, 'f', -1, 64),
+		},
+	}
+	h := Headroom{
+		Provider: provider,
+		// failOpen semantics: an inconclusive headroom is NOT exhaustion, so
+		// rotation keeps Copilot available; the guard reads ProbeErr as unknown
+		// and holds.
+		Available: true,
+		ResetAt:   reset,
+		Limits:    []LimitWindow{window},
+		ProbeErr:  errCopilotEntitlementUnknown,
+	}
+	if net > 0 {
+		// netQuantity > 0 is a documented direct signal that paid overage is
+		// being consumed. Reading it is not enabling it — nothing here creates
+		// or modifies a budget (TestNoCopilotBudgetMutation).
+		paid := true
+		h.PaidCreditsAvailable = &paid
+	}
+	return h, nil
+}
 
 // DeepSeekProber probes DeepSeek credit balance via its balance API.
 type DeepSeekProber struct {
@@ -998,6 +1305,8 @@ func NewManager(cfg config.RotationConfig) *Manager {
 			m.probers = append(m.probers, CodexProber{ThresholdPct: threshold})
 		case "google":
 			m.probers = append(m.probers, AgyProber{ThresholdPct: threshold})
+		case "github":
+			m.probers = append(m.probers, CopilotProber{ThresholdPct: threshold})
 		case "deepseek":
 			m.probers = append(m.probers, DeepSeekProber{})
 		}
