@@ -3,6 +3,8 @@ package spoke
 import (
 	"encoding/json"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -99,6 +101,16 @@ type Verifier struct {
 	seenSigned bool  // has a valid signed response ever been accepted?
 	lastSeq    int64 // highest accepted seq (rollback floor)
 
+	// statePath, when non-empty, persists seenSigned/lastSeq across process
+	// restarts. Without it both reset on every spoke restart, which re-opens
+	// the exact holes this verifier exists to close (issue #7121): a reset
+	// seenSigned returns an enforcing spoke to the pre-trust state where an
+	// unsigned (signature-stripped) response is accepted, and a reset lastSeq
+	// lets ANY previously captured signed response replay (hub seqs are
+	// unix-nano based, always > 0). Loading is fail-open — unreadable/corrupt
+	// state degrades to today's fresh-start behaviour, never a bricked spoke.
+	statePath string
+
 	logger *slog.Logger
 
 	// Observability counters (also surfaced to tests). Atomic so a reader need
@@ -110,12 +122,92 @@ type Verifier struct {
 }
 
 // NewVerifier builds a verifier in the given mode. A nil logger falls back to
-// slog.Default so a caller never has to guard the logger.
+// slog.Default so a caller never has to guard the logger. State is memory-only;
+// production callers should use NewPersistentVerifier so the replay floor and
+// trust flag survive a restart (issue #7121).
 func NewVerifier(mode Mode, logger *slog.Logger) *Verifier {
+	return NewPersistentVerifier(mode, logger, "")
+}
+
+// NewPersistentVerifier builds a verifier whose trust-on-first-signed flag and
+// rollback-replay floor survive process restarts by write-through persistence
+// to statePath (issue #7121). An empty statePath keeps state memory-only
+// (tests). Loading is FAIL-OPEN: a missing, unreadable, or corrupt state file
+// yields the same fresh state a new spoke has today, so persistence can never
+// brick a spoke — at worst it degrades to the pre-fix behaviour for one
+// process lifetime, and the file is rewritten on the next accepted signed
+// response.
+func NewPersistentVerifier(mode Mode, logger *slog.Logger, statePath string) *Verifier {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Verifier{mode: mode, logger: logger}
+	v := &Verifier{mode: mode, logger: logger, statePath: statePath}
+	if st, ok := loadVerifierState(statePath); ok {
+		v.seenSigned = st.SeenSigned
+		v.lastSeq = st.LastSeq
+		logger.Debug("heartbeat verify: restored persisted verifier state",
+			"path", statePath, "seen_signed", st.SeenSigned, "last_seq", st.LastSeq)
+	}
+	return v
+}
+
+// verifierState is the on-disk shape of the persisted trust/replay state.
+type verifierState struct {
+	SeenSigned bool  `json:"seen_signed"`
+	LastSeq    int64 `json:"last_seq"`
+}
+
+// loadVerifierState reads persisted state. ok is false — fail-open, fresh
+// state — for an empty path, a missing file, or undecodable contents.
+func loadVerifierState(path string) (verifierState, bool) {
+	var st verifierState
+	if path == "" {
+		return st, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return st, false
+	}
+	if err := json.Unmarshal(data, &st); err != nil {
+		return st, false
+	}
+	return st, true
+}
+
+// persistStateLocked writes the current trust/replay state through to
+// statePath. Called with v.mu held, only from the accepted-signed path, so
+// write frequency is one small file per accepted signed response (heartbeat
+// cadence, ~2 min). The write is atomic (temp file + rename) and 0600: the
+// file holds no secret, but nothing else needs to read it. A failed write is
+// logged and otherwise ignored — persistence is best-effort hardening and must
+// never fail a beat that already verified.
+func (v *Verifier) persistStateLocked() {
+	if v.statePath == "" {
+		return
+	}
+	data, err := json.Marshal(verifierState{SeenSigned: v.seenSigned, LastSeq: v.lastSeq})
+	if err != nil {
+		return
+	}
+	tmp := v.statePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		v.logger.Warn("heartbeat verify: failed to persist verifier state", "path", v.statePath, "error", err)
+		return
+	}
+	if err := os.Rename(tmp, v.statePath); err != nil {
+		v.logger.Warn("heartbeat verify: failed to persist verifier state", "path", v.statePath, "error", err)
+		_ = os.Remove(tmp)
+	}
+}
+
+// DefaultStatePath returns the conventional persisted-state location under a
+// spoke's durable data dir, or "" (memory-only) when dir is "". Split out so
+// pkg/hub and tests derive the same path.
+func DefaultStatePath(dir string) string {
+	if strings.TrimSpace(dir) == "" {
+		return ""
+	}
+	return filepath.Join(dir, "heartbeat-sig-state.json")
 }
 
 // Mode reports the verifier's configured mode.
@@ -228,6 +320,7 @@ func (v *Verifier) Verify(pubKeys []string, wantHiveID string, body []byte, sigH
 	// Fully valid signed response: establish/renew trust and advance the floor.
 	v.seenSigned = true
 	v.lastSeq = env.Seq
+	v.persistStateLocked()
 	v.cAccepted.Add(1)
 	v.cSignedAccepted.Add(1)
 	v.logger.Debug("heartbeat verify: signed response accepted",
