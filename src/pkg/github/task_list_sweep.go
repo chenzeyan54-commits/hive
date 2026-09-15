@@ -22,7 +22,7 @@ const taskListSweepCommentTemplate = "task-list sweep: closing this issue becaus
 
 const (
 	taskListReasonNotHiveFiled  = "not-hive-filed"
-	taskListReasonHeld          = "hold-label"
+	taskListReasonExempt          = "exempt-label"
 	taskListReasonNoBoxes       = "no-task-list"
 	taskListReasonHasUnticked   = "unticked-boxes"
 	taskListReasonCommentFailed = "comment-failed"
@@ -184,7 +184,13 @@ func issueLabelNames(labels []*gh.Label) []string {
 //     isHumanFiledBugReport here — that helper is fail-OPEN on ambiguity and
 //     gates on a bug-family label, so a human issue without a `bug` label
 //     would slip through.
-//  3. Skip held issues (HasHoldLabel — same set the rest of the codebase honours).
+//  3. Skip issues carrying an exempt/hold label. This delegates to the same
+//     Client.isExempt used by fetchIssues — see issue_filter.go for the
+//     invariant that there is exactly ONE exclusion mechanism (permanent
+//     do-not-merge/* prefix + configured governor.labels.exempt). Do not
+//     hardcode a exempt-label string here: real labels in this repo are
+//     do-not-merge/hold and do-not-merge/blocked-paths, both covered by the
+//     "do-not-merge" prefix in PermanentExemptLabels.
 //  4. Skip issues with zero boxes. An issue whose body is entirely prose has no
 //     machine-readable completion criterion; closing it here would break the
 //     policy in Half A instead of enforcing it.
@@ -273,8 +279,8 @@ func (c *Client) trySweepTaskListIssue(ctx context.Context, displayRepo, owner, 
 	if !isHiveFiledIssue(issue) {
 		return TaskListSweepEvent{}, taskListReasonNotHiveFiled, nil
 	}
-	if HasHoldLabel(issueLabelNames(issue.Labels)) {
-		return TaskListSweepEvent{}, taskListReasonHeld, nil
+	if c.isExempt(issueLabelNames(issue.Labels)) {
+		return TaskListSweepEvent{}, taskListReasonExempt, nil
 	}
 	checked, unchecked := countTaskListBoxes(issue.GetBody())
 	if checked+unchecked == 0 {

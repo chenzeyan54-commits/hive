@@ -212,7 +212,7 @@ func TestSweepCompletedTaskListIssues(t *testing.T) {
 		{
 			Number:      105,
 			Body:        "- [x] a\n- [x] b\n" + hiveTrailer,
-			Labels:      []string{"hold"},
+			Labels:      []string{"do-not-merge/hold"},
 			AuthorLogin: "hive-app[bot]",
 		},
 		{
@@ -242,6 +242,17 @@ func TestSweepCompletedTaskListIssues(t *testing.T) {
 			Body:        "- [x] a\n- [x] b\n",
 			AuthorLogin: "some-human",
 			AuthorType:  "User",
+		},
+		// #110 — do-not-merge/blocked-paths is the OTHER real hold label in
+		// this repo. Both are covered by the "do-not-merge" prefix entry in
+		// PermanentExemptLabels; delegating to Client.isExempt (not a
+		// hardcoded string) is what makes this work without knowing the
+		// label suffixes ahead of time.
+		{
+			Number:      110,
+			Body:        "- [x] a\n- [x] b\n" + hiveTrailer,
+			Labels:      []string{"do-not-merge/blocked-paths"},
+			AuthorLogin: "hive-app[bot]",
 		},
 	}
 
