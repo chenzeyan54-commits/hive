@@ -115,15 +115,39 @@ func countTaskListBoxes(body string) (checked, unchecked int) {
 	return checked, unchecked
 }
 
-// isHiveFiledIssue reports whether issue was filed by the hive itself. It reuses
-// the same signal isHumanFiledBugReport uses — every hive-mediated create is
-// stamped by AppendTrailer with AttributionTrailerPrefix — so a maintainer's
-// issue is never eligible for auto-close no matter what its body looks like.
+// isHiveFiledIssue reports whether issue was filed by the hive itself. Fail-CLOSED:
+// only returns true when hive authorship is affirmatively provable — ambiguity
+// keeps the issue open (which is what the sweep's caller wants; we never want
+// to auto-close something we can't prove we filed).
+//
+// Two independent positive signals, either sufficient:
+//
+//  1. Body carries AttributionTrailerPrefix ("— hive:"). Every hive-mediated
+//     create is stamped by AppendTrailer with that greppable marker
+//     (attribution.go:40, and see the comment at pr_request_claims.go
+//     confirming "Every hive-mediated create is stamped by AppendTrailer with
+//     that greppable marker").
+//  2. User.Type is "Bot" (case-insensitive). App-installation-token-authored
+//     issues carry User.Type == "Bot", per the same rationale in
+//     pr_request_claims.go — an issue authored from a bot account is
+//     definitionally not a human report.
+//
+// Do NOT reuse isHumanFiledBugReport as an inverse test: it is fail-OPEN on
+// ambiguity (its own doc says "an agent's bug finding stays closeable, and a
+// maintainer's bug is protected"), and it returns false immediately for any
+// issue lacking a bug-family label, so a human-filed issue with no `bug` label
+// would slip past — the exact outcome this sweep must never produce.
 func isHiveFiledIssue(issue *gh.Issue) bool {
 	if issue == nil {
 		return false
 	}
-	return strings.Contains(issue.GetBody(), AttributionTrailerPrefix)
+	if strings.Contains(issue.GetBody(), AttributionTrailerPrefix) {
+		return true
+	}
+	if issue.User != nil && strings.EqualFold(issue.User.GetType(), "Bot") {
+		return true
+	}
+	return false
 }
 
 // issueLabelNames extracts the *gh.Label slice's names as strings so the shared
@@ -152,10 +176,14 @@ func issueLabelNames(labels []*gh.Label) []string {
 // keep:
 //
 //  1. Skip pull requests (Issues.ListByRepo returns both).
-//  2. Skip issues whose body does not carry AttributionTrailerPrefix — a
-//     maintainer-filed issue is never closed by this sweep, even if it happens
-//     to have a completed task list, because the hive did not file the unit of
-//     work and cannot decide it is done.
+//  2. Skip issues that are not affirmatively hive-filed — either the body
+//     carries AttributionTrailerPrefix, or the author is a Bot (User.Type ==
+//     "Bot"). Fail-CLOSED: if we cannot prove hive authorship we leave the
+//     issue open, so a maintainer-filed issue is never touched by this sweep
+//     no matter what its body or labels look like. Do NOT invert
+//     isHumanFiledBugReport here — that helper is fail-OPEN on ambiguity and
+//     gates on a bug-family label, so a human issue without a `bug` label
+//     would slip through.
 //  3. Skip held issues (HasHoldLabel — same set the rest of the codebase honours).
 //  4. Skip issues with zero boxes. An issue whose body is entirely prose has no
 //     machine-readable completion criterion; closing it here would break the

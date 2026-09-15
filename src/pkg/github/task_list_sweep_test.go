@@ -103,6 +103,7 @@ type taskListSweepFixture struct {
 	Labels      []string
 	IsPR        bool
 	AuthorLogin string
+	AuthorType  string // "User" (default) or "Bot"
 }
 
 // taskListSweepServer stands up a repo mux that:
@@ -136,8 +137,12 @@ func taskListSweepServer(t *testing.T, org, repo string, issues []taskListSweepF
 				"body":   iss.Body,
 				"state":  "open",
 				"labels": labels,
-				"user":   map[string]any{"login": iss.AuthorLogin, "type": "User"},
 			}
+			authorType := iss.AuthorType
+			if authorType == "" {
+				authorType = "User"
+			}
+			entry["user"] = map[string]any{"login": iss.AuthorLogin, "type": authorType}
 			if iss.IsPR {
 				entry["pull_request"] = map[string]any{"url": fmt.Sprintf("/repos/%s/%s/pulls/%d", org, repo, iss.Number)}
 			}
@@ -220,6 +225,24 @@ func TestSweepCompletedTaskListIssues(t *testing.T) {
 			Body:        "```\n- [ ] fake\n- [ ] also fake\n```\n\n- [x] real\n" + hiveTrailer,
 			AuthorLogin: "hive-app[bot]",
 		},
+		// #108 — all ticked + Bot author + NO trailer. Bot authorship is a
+		// second positive hive-authorship signal, so this MUST close.
+		{
+			Number:      108,
+			Body:        "- [x] a\n- [x] b\n",
+			AuthorLogin: "hive-app[bot]",
+			AuthorType:  "Bot",
+		},
+		// #109 — critical human-safety case: all ticked + non-Bot User + NO
+		// trailer. Fail-CLOSED means this MUST stay open. A regression here is
+		// the one outcome we absolutely cannot ship — the sweep would be
+		// closing maintainer-filed issues on their behalf.
+		{
+			Number:      109,
+			Body:        "- [x] a\n- [x] b\n",
+			AuthorLogin: "some-human",
+			AuthorType:  "User",
+		},
 	}
 
 	server, commented, closed := taskListSweepServer(t, org, repo, fixtures)
@@ -235,7 +258,7 @@ func TestSweepCompletedTaskListIssues(t *testing.T) {
 		t.Fatalf("SweepCompletedTaskListIssues: %v", err)
 	}
 
-	wantClosed := map[int]bool{101: true, 106: true, 107: true}
+	wantClosed := map[int]bool{101: true, 106: true, 107: true, 108: true}
 	if len(*closed) != len(wantClosed) {
 		t.Fatalf("closed=%v; want exactly %v", *closed, keys(wantClosed))
 	}
@@ -308,19 +331,26 @@ func TestSweepCompletedTaskListIssues_RespectsMaxCloses(t *testing.T) {
 // it — this test guards the classifier against exactly that regression.
 func TestIsHiveFiledIssue(t *testing.T) {
 	cases := []struct {
-		name string
-		body string
-		want bool
+		name       string
+		body       string
+		authorType string
+		want       bool
 	}{
-		{"nil body is not hive-filed", "", false},
-		{"body with trailer is hive-filed", "some finding\n\n" + AttributionTrailerPrefix + " scanner", true},
-		{"body without trailer is not hive-filed", "some finding without any hive stamp", false},
+		{"nil body + non-Bot is not hive-filed", "", "User", false},
+		{"body with trailer + non-Bot is hive-filed", "some finding\n\n" + AttributionTrailerPrefix + " scanner", "User", true},
+		{"body without trailer + non-Bot is not hive-filed", "some finding without any hive stamp", "User", false},
+		{"Bot author with no trailer is hive-filed", "no trailer here", "Bot", true},
+		{"Bot author (lowercase 'bot') is hive-filed", "no trailer here", "bot", true},
+		{"Bot author + trailer is hive-filed", "with trailer\n\n" + AttributionTrailerPrefix + " x", "Bot", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			iss := &gh.Issue{Body: gh.Ptr(tc.body)}
+			iss := &gh.Issue{
+				Body: gh.Ptr(tc.body),
+				User: &gh.User{Type: gh.Ptr(tc.authorType)},
+			}
 			if got := isHiveFiledIssue(iss); got != tc.want {
-				t.Errorf("isHiveFiledIssue(%q) = %v; want %v", tc.body, got, tc.want)
+				t.Errorf("isHiveFiledIssue(body=%q, type=%q) = %v; want %v", tc.body, tc.authorType, got, tc.want)
 			}
 		})
 	}
