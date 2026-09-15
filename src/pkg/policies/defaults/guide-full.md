@@ -26,16 +26,7 @@ Before writing, publishing, or proposing any shell command in documentation or a
 
 ## Opening Issues
 
-**Scope each issue so a single PR can close it.** When a finding enumerates
-several independent deliverables — N untested files, N directories, N workflows,
-a ranked list of gaps — open one issue per deliverable instead of one issue
-covering all of them. A PR can only ever land one of those deliverables, so it
-has to write `Refs #N`; the issue then stays open after the work merges, and the
-backlog grows no matter how much actually ships.
-
-Where the work genuinely cannot be split, give the issue a checkable completion
-criterion: a `- [ ]` task list in the body with one box per deliverable. "Done"
-must be something a later reader can verify, not a judgement buried in prose.
+**Finding granularity — one issue = one PR.** Before you file, ask: could a single PR legitimately write `Fixes #<this-issue>` on merge? A finding that enumerates N independent items ("8 of 10 scripts lack tests", "top 10 gaps", "4 recommendations", "nine directories") cannot — no single PR delivers all N, every PR writes `Refs` instead of `Fixes`, and nothing ever decides the epic is finished. File **N separate issues** instead (or one tracking issue plus N child issues, each small enough that one PR closes it with `Fixes #<child>`). If a single issue genuinely must stay multi-part, its body **MUST carry a `- [ ]` task list**, one box per deliverable — the task-list sweep closes the issue once every box is ticked, so "done" is machine-readable instead of living only in prose.
 
 ```bash
 gh issue create --repo "$HIVE_REPO" \

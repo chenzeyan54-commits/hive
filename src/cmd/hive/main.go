@@ -5226,6 +5226,7 @@ func main() {
 	ticker := time.NewTicker(time.Duration(cfg.Governor.EvalIntervalS) * time.Second)
 	defer ticker.Stop()
 	var lastAutoMergeSweep time.Time
+	var lastTaskListSweep time.Time
 
 	var agentTicker *time.Ticker
 	if cfg.Dashboard.AgentPollIntervalS > 0 {
@@ -5268,6 +5269,7 @@ func main() {
 		wd.Tick(ctx)
 	}
 	runAutoMergeSweepIfDue(ctx, ghClient, dashSrv, &lastAutoMergeSweep, logger)
+	runTaskListSweepIfDue(ctx, ghClient, dashSrv, &lastTaskListSweep, logger)
 	persistState(agentMgr, gov, cfg, statePath, logger, dashSrv, wd)
 
 	agentTickCh := func() <-chan time.Time {
@@ -5344,6 +5346,7 @@ func main() {
 			runEvalCycle(ctx, cfg, ghClient, gov, sched, agentMgr, dashSrv, notifier, beadStores, tokenCollector, metricsCollector, nousState, &lastActionable, advisoryStore, advisoryIssues, restarted, logger)
 			runRotationCheck(ctx, cfg, rotationMgr, gov, agentMgr, logger)
 			runAutoMergeSweepIfDue(ctx, ghClient, dashSrv, &lastAutoMergeSweep, logger)
+			runTaskListSweepIfDue(ctx, ghClient, dashSrv, &lastTaskListSweep, logger)
 			// Trajectory review runs after the eval cycle (so kicks/intents are
 			// current) on its own cadence, gated by Due().
 			if trajLane != nil && trajLane.Due(time.Now()) {
@@ -8248,6 +8251,13 @@ func runEscalationSweep(
 // hammering the GitHub API on short eval intervals.
 const autoMergeSweepInterval = time.Minute
 
+// taskListSweepInterval is the minimum spacing between task-list sweeps. The
+// sweep enumerates every open issue in every repo — much heavier than the
+// auto-merge sweep's label-scoped query — and "done" moves at PR-merge cadence,
+// so a 15-minute floor keeps the API cost modest while still closing completed
+// epics on the same day the last box gets ticked.
+const taskListSweepInterval = 15 * time.Minute
+
 // trustedMergerFunc resolves a GitHub login against the hive's authorized-users
 // allowlist and reports whether it holds at least config.RoleMerger — the same
 // bar requireMergerOrOwnerRole enforces on the dashboard queue endpoint (audit
@@ -8378,6 +8388,54 @@ func runAutoMergeSweepIfDue(ctx context.Context, ghClient *github.Client, dashSr
 		Attrs: map[string]string{
 			"seen":    strconv.Itoa(result.Seen),
 			"merged":  strconv.Itoa(len(result.Merged)),
+			"skipped": strconv.Itoa(result.Skipped),
+		},
+	})
+}
+
+// runTaskListSweepIfDue closes hive-filed issues whose task-list bodies are
+// fully ticked, at most once per taskListSweepInterval. The finding-granularity
+// policy (guidance now in every issue-filing template) tells agents to encode
+// multi-part deliverables as `- [ ]` boxes; this is the sink that turns those
+// boxes into closures. All safety gates — hive-filed only, at-least-one-box,
+// all-boxes-ticked, hold-label respected, per-tick cap — live inside
+// SweepCompletedTaskListIssues; this function is only the scheduler and the
+// dashboard audit sink, mirroring runAutoMergeSweepIfDue above.
+func runTaskListSweepIfDue(ctx context.Context, ghClient *github.Client, dashSrv *dashboard.Server, lastRun *time.Time, logger *slog.Logger) {
+	if ghClient == nil {
+		return
+	}
+	now := time.Now()
+	if lastRun != nil && !lastRun.IsZero() && now.Sub(*lastRun) < taskListSweepInterval {
+		return
+	}
+	if lastRun != nil {
+		*lastRun = now
+	}
+	result, err := ghClient.SweepCompletedTaskListIssues(ctx, github.TaskListSweepOptions{
+		MaxCloses: github.DefaultTaskListSweepMaxCloses,
+		Audit: func(event github.TaskListSweepEvent) {
+			if dashSrv == nil {
+				return
+			}
+			detail := fmt.Sprintf("repo=%s, issue=%d, author=%s, boxes=%d",
+				event.Repo, event.Number, event.Author, event.TotalBoxes)
+			dashSrv.AuditLog("system", "task-list-sweep-closed", detail, "")
+		},
+	})
+	if err != nil {
+		logger.Warn("task-list sweep failed", "error", err)
+		return
+	}
+	if len(result.Closed) > 0 || result.Seen > 0 {
+		logger.Info("task-list sweep complete", "seen", result.Seen, "closed", len(result.Closed), "skipped", result.Skipped)
+	}
+	hookDispatcher().Fire(context.Background(), hooks.Payload{
+		Transition: hooks.TransitionSweepCompleted,
+		Reason:     "task-list sweep complete",
+		Attrs: map[string]string{
+			"seen":    strconv.Itoa(result.Seen),
+			"closed":  strconv.Itoa(len(result.Closed)),
 			"skipped": strconv.Itoa(result.Skipped),
 		},
 	})

@@ -29,6 +29,8 @@ must be something a later reader can verify, not a judgement buried in prose.
 
 When you find a testing gap worth addressing, open a GitHub issue:
 
+**Finding granularity — one issue = one PR.** Before you file, ask: could a single PR legitimately write `Fixes #<this-issue>` on merge? A finding that enumerates N independent items ("8 of 10 scripts lack tests", "top 10 gaps", "4 recommendations", "nine directories") cannot — no single PR delivers all N, every PR writes `Refs` instead of `Fixes`, and nothing ever decides the epic is finished. File **N separate issues** instead (or one tracking issue plus N child issues, each small enough that one PR closes it with `Fixes #<child>`). If a single issue genuinely must stay multi-part, its body **MUST carry a `- [ ]` task list**, one box per deliverable — the task-list sweep closes the issue once every box is ticked, so "done" is machine-readable instead of living only in prose.
+
 ```bash
 gh issue create --repo "$HIVE_REPO" \
   --title "[quality] Short description of the testing gap" \
