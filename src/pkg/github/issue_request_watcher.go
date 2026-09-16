@@ -497,6 +497,14 @@ func (c *Client) CreateIssue(ctx context.Context, repo, title, body string, labe
 	if title == "" {
 		return CreateIssueResult{}, fmt.Errorf("CreateIssue: title is required")
 	}
+	// Same posture and same placement as validateRepoRef above: a request that
+	// is still carrying its template cannot become a useful issue, and unlike a
+	// bad repo ref it would SUCCEED, leaving a human to triage an empty report
+	// (#7153). Checked before the dedupe lookup so a malformed title never
+	// becomes the thing future filings dedupe against.
+	if err := validateIssueTemplateFilled(title, body); err != nil {
+		return CreateIssueResult{}, fmt.Errorf("CreateIssue: %w", err)
+	}
 	if leak, ok := c.scanCanaryText(title+"\n"+body, "hive-open-issue:"+repo); ok {
 		if c.canaryFailClosed {
 			return CreateIssueResult{}, fmt.Errorf("ioscan canary leak detected: agent=%s source=%s", leak.Agent, leak.Source)
