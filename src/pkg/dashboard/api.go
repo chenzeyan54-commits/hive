@@ -3895,6 +3895,10 @@ func (s *Server) substituteTemplateVars(template, agentName string) string {
 }
 
 func (s *Server) loadAgentStats(name string) []any {
+	var cfg *config.Config
+	if s.deps != nil {
+		cfg = s.deps.Config
+	}
 	statsFile := fmt.Sprintf("/data/agents/%s/stats.json", name)
 	data, err := os.ReadFile(statsFile)
 	if err == nil {
@@ -3902,14 +3906,14 @@ func (s *Server) loadAgentStats(name string) []any {
 			Stats []any `json:"stats"`
 		}
 		if json.Unmarshal(data, &wrapper) == nil && len(wrapper.Stats) > 0 {
-			return wrapper.Stats
+			return scopeHealthStats(name, wrapper.Stats, cfg)
 		}
 		var stats []any
 		if json.Unmarshal(data, &stats) == nil && len(stats) > 0 {
-			return stats
+			return scopeHealthStats(name, stats, cfg)
 		}
 	}
-	return defaultStatsConfig(name)
+	return scopeHealthStats(name, defaultStatsConfig(name), cfg)
 }
 
 func (s *Server) handleAgentConfigGeneral(w http.ResponseWriter, r *http.Request) {

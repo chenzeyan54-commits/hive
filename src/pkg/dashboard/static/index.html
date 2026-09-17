@@ -1175,6 +1175,7 @@
     .health-ci.good { color: var(--green); }
     .health-ci.warn { color: var(--yellow); }
     .health-ci.bad { color: var(--red); }
+    .health-ci.none { color: var(--muted); }
     /* .btn / .terminal-link / .restart-btn — button system recipes at end of style block */
     /* .backend-select — shared input recipe (end of style block) */
     .backend-select { appearance: none; -webkit-appearance: none; cursor: pointer; }
@@ -1509,6 +1510,8 @@
     .ind-warn .ind-num { color: var(--yellow); }
     .ind-ok { color: var(--green); }
     .ind-ok .ind-num { color: var(--green); }
+    .ind-none { color: var(--muted); }
+    .ind-none .ind-num { color: var(--muted); }
     .ind-row { display: flex; flex-wrap: wrap; gap: 12px; }
     .ind-summary { font-size: 0.7rem; color: var(--text); margin-bottom: 4px; line-height: 1.4; opacity: 0.85; }
 
@@ -6060,27 +6063,39 @@
         return `<span class="ind-dot-item"${tipAttr}><span class="health-dot ${dotCls}"></span><span class="ind-dlabel">${label}</span></span>`;
       }
 
+      // A percentage stat with no underlying metric is NOT zero percent: the
+      // old `v || 0` turned "never measured" into a confident 0%, which reads
+      // as a real, catastrophic result (hivecommons/hive#7411). Treat only a
+      // finite number as a measurement and render — otherwise, matching the
+      // LAST KICK / AVG PASS fields on the same card.
+      const statNum = Number(v);
+      const measured = v !== undefined && v !== null && v !== '' && Number.isFinite(statNum);
+
       if (style === 'pct') {
         const PCT_GOOD = 90;
         const PCT_WARN = 70;
-        const cls = v >= PCT_GOOD ? 'good' : v >= PCT_WARN ? 'warn' : 'bad';
-        return `<span class="ind-dot-item"${tipAttr}><span class="health-ci ${cls}">${v || 0}%</span><span class="ind-dlabel">${label}</span></span>`;
+        const cls = !measured ? 'none' : statNum >= PCT_GOOD ? 'good' : statNum >= PCT_WARN ? 'warn' : 'bad';
+        const text = measured ? `${statNum}%` : '—';
+        return `<span class="ind-dot-item"${tipAttr}><span class="health-ci ${cls}">${text}</span><span class="ind-dlabel">${label}</span></span>`;
       }
 
       if (style === 'pct-bar') {
-        const pct = v || 0;
+        const pct = measured ? statNum : 0;
         const target = stat.target || 100;
         const TARGET_WARN_OFFSET = 10;
-        const covCls = pct >= target ? 'ind-ok' : pct >= target - TARGET_WARN_OFFSET ? 'ind-warn' : 'ind-err';
+        const covCls = !measured ? 'ind-none' : pct >= target ? 'ind-ok' : pct >= target - TARGET_WARN_OFFSET ? 'ind-warn' : 'ind-err';
         const barColor = pct >= target ? 'var(--green)' : pct >= target - TARGET_WARN_OFFSET ? 'var(--yellow)' : 'var(--red)';
         const MAX_BAR_WIDTH = 120;
         const BAR_HEIGHT = 6;
+        const barWidth = measured ? Math.min(pct / target * 100, 100) : 0;
+        const valueText = measured ? `${pct}%` : '—';
+        const valueLabel = measured ? 'current' : 'not measured';
         return `<div class="ind-group"><span class="ind-group-label">${label.toUpperCase()}</span><div class="ind-dots">
-          <span class="ind-dot-item"><span class="ind-num ${covCls}">${pct}%</span><span class="ind-dlabel">current</span></span>
+          <span class="ind-dot-item"><span class="ind-num ${covCls}">${valueText}</span><span class="ind-dlabel">${valueLabel}</span></span>
           <span class="ind-dot-item"><span class="ind-dlabel">goal: ${target}%</span></span>
           <span class="ind-dot-item" style="flex:1;max-width:${MAX_BAR_WIDTH}px">
             <div style="background:var(--border);border-radius:3px;height:${BAR_HEIGHT}px;width:100%;position:relative">
-              <div style="background:${barColor};height:100%;border-radius:3px;width:${Math.min(pct / target * 100, 100)}%"></div>
+              <div style="background:${barColor};height:100%;border-radius:3px;width:${barWidth}%"></div>
             </div>
           </span>
         </div></div>`;

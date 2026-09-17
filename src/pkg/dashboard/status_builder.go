@@ -843,7 +843,7 @@ func buildAgentsWithHidden(statuses map[string]*agent.AgentProcess, cfg *config.
 			GovCostWeight:   0,
 			LiveSummary:     liveSummary,
 			DetailSummary:   detailSummary,
-			StatsConfig:     resolveStatsSources(loadStatsConfig(name), cfg),
+			StatsConfig:     resolveStatsSources(scopeHealthStats(name, loadStatsConfig(name), cfg), cfg),
 			LastError:       proc.LastError,
 			StallNudges:     proc.StallNudges,
 			ActionNudges:    proc.ActionNudges,
@@ -1007,7 +1007,7 @@ func buildMissingRuntimeAgent(name string, agentCfg config.AgentConfig, cfg *con
 		Cadence:          cadenceDisplay(cadenceValue),
 		GovBackend:       cli,
 		GovModel:         model,
-		StatsConfig:      resolveStatsSources(loadStatsConfig(name), cfg),
+		StatsConfig:      resolveStatsSources(scopeHealthStats(name, loadStatsConfig(name), cfg), cfg),
 		Mode:             mode.String(),
 		ModeEmoji:        mode.Emoji(),
 		DefaultMode:      defaultMode.String(),
@@ -1089,8 +1089,14 @@ func resolveStatsSources(stats []any, cfg *config.Config) []any {
 	return stats
 }
 
-// LoadStatsConfigWithCfg reads stats from disk, then falls back to config StatsDisplay field.
+// LoadStatsConfigWithCfg reads stats from disk, then falls back to config
+// StatsDisplay field. Health-sourced stats are scoped to the CI owner
+// (hivecommons/hive#7411).
 func LoadStatsConfigWithCfg(name string, cfg *config.Config) []any {
+	return scopeHealthStats(name, loadStatsConfigWithCfg(name, cfg), cfg)
+}
+
+func loadStatsConfigWithCfg(name string, cfg *config.Config) []any {
 	statsFile := fmt.Sprintf("/data/agents/%s/stats.json", name)
 	data, err := os.ReadFile(statsFile)
 	if err == nil {
@@ -1172,6 +1178,48 @@ func defaultStatsConfig(name string) []any {
 		return d
 	}
 	return []any{}
+}
+
+// agentOwnsCIHealth reports whether `source: "health"` stats belong on this
+// agent's card. Health stats describe the PRIMARY REPO's workflows (brew, helm,
+// CI pass rate, the nightly/weekly release runs) — they are the CI owner's
+// dashboard, not a per-agent measurement. The key matches the one the ACMM
+// coverage gate reads (agentMetricsCIMaintainerKey), so both agree on which
+// agent owns CI.
+func agentOwnsCIHealth(name string, cfg *config.Config) bool {
+	if name == agentMetricsCIMaintainerKey {
+		return true
+	}
+	if cfg == nil {
+		return false
+	}
+	ac, ok := cfg.Agents[name]
+	if !ok {
+		return false
+	}
+	return ac.Role == agentMetricsCIMaintainerKey || ac.ReplicaOf == agentMetricsCIMaintainerKey
+}
+
+// scopeHealthStats drops health-sourced stats from any agent that does not own
+// CI. A stats.json copied from ci-maintainer — as the retired "reviewer" seed
+// did, verbatim — otherwise rendered the whole CI/release indicator strip on an
+// agent that runs no workflows (hivecommons/hive#7411). Applied on read so an
+// already-persisted copy on a live spoke is repaired without touching the
+// operator's file.
+func scopeHealthStats(name string, stats []any, cfg *config.Config) []any {
+	if len(stats) == 0 || agentOwnsCIHealth(name, cfg) {
+		return stats
+	}
+	kept := make([]any, 0, len(stats))
+	for _, raw := range stats {
+		if m, ok := raw.(map[string]any); ok {
+			if src, _ := m["source"].(string); src == "health" {
+				continue
+			}
+		}
+		kept = append(kept, raw)
+	}
+	return kept
 }
 
 // CollectAgentStats resolves current stat values for all agents, keyed by agent name then stat key.
