@@ -843,7 +843,7 @@ func buildAgentsWithHidden(statuses map[string]*agent.AgentProcess, cfg *config.
 			GovCostWeight:   0,
 			LiveSummary:     liveSummary,
 			DetailSummary:   detailSummary,
-			StatsConfig:     resolveStatsSources(scopeHealthStats(name, loadStatsConfig(name), cfg), cfg),
+			StatsConfig:     resolveStatsSources(scopeCIOwnerStats(name, loadStatsConfig(name), cfg), cfg),
 			LastError:       proc.LastError,
 			StallNudges:     proc.StallNudges,
 			ActionNudges:    proc.ActionNudges,
@@ -1007,7 +1007,7 @@ func buildMissingRuntimeAgent(name string, agentCfg config.AgentConfig, cfg *con
 		Cadence:          cadenceDisplay(cadenceValue),
 		GovBackend:       cli,
 		GovModel:         model,
-		StatsConfig:      resolveStatsSources(scopeHealthStats(name, loadStatsConfig(name), cfg), cfg),
+		StatsConfig:      resolveStatsSources(scopeCIOwnerStats(name, loadStatsConfig(name), cfg), cfg),
 		Mode:             mode.String(),
 		ModeEmoji:        mode.Emoji(),
 		DefaultMode:      defaultMode.String(),
@@ -1090,10 +1090,10 @@ func resolveStatsSources(stats []any, cfg *config.Config) []any {
 }
 
 // LoadStatsConfigWithCfg reads stats from disk, then falls back to config
-// StatsDisplay field. Health-sourced stats are scoped to the CI owner
+// StatsDisplay field. The CI/coverage strip is scoped to the CI owner
 // (hivecommons/hive#7411).
 func LoadStatsConfigWithCfg(name string, cfg *config.Config) []any {
-	return scopeHealthStats(name, loadStatsConfigWithCfg(name, cfg), cfg)
+	return scopeCIOwnerStats(name, loadStatsConfigWithCfg(name, cfg), cfg)
 }
 
 func loadStatsConfigWithCfg(name string, cfg *config.Config) []any {
@@ -1180,13 +1180,13 @@ func defaultStatsConfig(name string) []any {
 	return []any{}
 }
 
-// agentOwnsCIHealth reports whether `source: "health"` stats belong on this
-// agent's card. Health stats describe the PRIMARY REPO's workflows (brew, helm,
-// CI pass rate, the nightly/weekly release runs) — they are the CI owner's
-// dashboard, not a per-agent measurement. The key matches the one the ACMM
-// coverage gate reads (agentMetricsCIMaintainerKey), so both agree on which
-// agent owns CI.
-func agentOwnsCIHealth(name string, cfg *config.Config) bool {
+// agentOwnsCIStats reports whether the CI/coverage indicator strip belongs on
+// this agent's card. The strip describes the PRIMARY REPO's build health (brew,
+// helm, CI pass rate, the nightly/weekly release runs) and its test coverage —
+// one agent's dashboard, not a per-agent measurement. The key is the one the
+// ACMM coverage gate reads (agentMetricsCIMaintainerKey), so both agree on
+// which agent owns CI.
+func agentOwnsCIStats(name string, cfg *config.Config) bool {
 	if name == agentMetricsCIMaintainerKey {
 		return true
 	}
@@ -1200,22 +1200,44 @@ func agentOwnsCIHealth(name string, cfg *config.Config) bool {
 	return ac.Role == agentMetricsCIMaintainerKey || ac.ReplicaOf == agentMetricsCIMaintainerKey
 }
 
-// scopeHealthStats drops health-sourced stats from any agent that does not own
-// CI. A stats.json copied from ci-maintainer — as the retired "reviewer" seed
-// did, verbatim — otherwise rendered the whole CI/release indicator strip on an
-// agent that runs no workflows (hivecommons/hive#7411). Applied on read so an
-// already-persisted copy on a live spoke is repaired without touching the
-// operator's file.
-func scopeHealthStats(name string, stats []any, cfg *config.Config) []any {
-	if len(stats) == 0 || agentOwnsCIHealth(name, cfg) {
+// isCIOwnerStat reports whether a stat entry belongs to the CI owner's strip:
+// anything read from the repo-wide `health` blob, plus the coverage metric,
+// which collectCoverage only ever files under AgentMetrics["ci-maintainer"]
+// (metrics_collector.go) and so can never hold a value for anyone else.
+func isCIOwnerStat(stat map[string]any) bool {
+	src, _ := stat["source"].(string)
+	if src == "health" {
+		return true
+	}
+	if src != "agentMetrics" {
+		return false
+	}
+	field, _ := stat["field"].(string)
+	if field == "" {
+		field, _ = stat["key"].(string)
+	}
+	return field == agentMetricsCoverageKey
+}
+
+// scopeCIOwnerStats drops the CI/coverage strip from every agent that does not
+// own CI, so those cards render NO strip at all — not a strip of numbers that
+// was never measured for them (hivecommons/hive#7411). A stats.json copied from
+// ci-maintainer — as the retired "reviewer" seed was, verbatim — otherwise
+// showed the whole CI/release row headed by a fabricated "COVERAGE 0% vs goal
+// 91%" on an agent that runs no workflows. The rule is CI ownership, not a
+// hard-coded agent name, so the next agent created with a copied stats file is
+// covered too.
+//
+// Applied on read, so a copy already persisted on a live spoke stops rendering
+// without rewriting the operator's file.
+func scopeCIOwnerStats(name string, stats []any, cfg *config.Config) []any {
+	if len(stats) == 0 || agentOwnsCIStats(name, cfg) {
 		return stats
 	}
 	kept := make([]any, 0, len(stats))
 	for _, raw := range stats {
-		if m, ok := raw.(map[string]any); ok {
-			if src, _ := m["source"].(string); src == "health" {
-				continue
-			}
+		if m, ok := raw.(map[string]any); ok && isCIOwnerStat(m) {
+			continue
 		}
 		kept = append(kept, raw)
 	}

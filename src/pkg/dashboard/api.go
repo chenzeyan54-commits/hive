@@ -3906,14 +3906,14 @@ func (s *Server) loadAgentStats(name string) []any {
 			Stats []any `json:"stats"`
 		}
 		if json.Unmarshal(data, &wrapper) == nil && len(wrapper.Stats) > 0 {
-			return scopeHealthStats(name, wrapper.Stats, cfg)
+			return scopeCIOwnerStats(name, wrapper.Stats, cfg)
 		}
 		var stats []any
 		if json.Unmarshal(data, &stats) == nil && len(stats) > 0 {
-			return scopeHealthStats(name, stats, cfg)
+			return scopeCIOwnerStats(name, stats, cfg)
 		}
 	}
-	return scopeHealthStats(name, defaultStatsConfig(name), cfg)
+	return scopeCIOwnerStats(name, defaultStatsConfig(name), cfg)
 }
 
 func (s *Server) handleAgentConfigGeneral(w http.ResponseWriter, r *http.Request) {
