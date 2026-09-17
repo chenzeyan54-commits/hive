@@ -82,13 +82,13 @@ function mockTtydWS(port) {
 // runs in: a hub master (so the session key resolves), a hive id, an authorized
 // user list — and NO dashboard token, which is what removes the second half of
 // the `isHosted || DASHBOARD_TOKEN` guard.
-function startProxy() {
+function startProxy(envOverrides = {}, port = PROXY_PORT) {
   return new Promise((resolve, reject) => {
     const proc = spawn('node', ['server.js'], {
       cwd: __dirname,
       env: {
         ...process.env,
-        HIVE_PROXY_PORT: String(PROXY_PORT),
+        HIVE_PROXY_PORT: String(port),
         HIVE_API_PORT: String(GO_PORT),
         HIVE_TTYD_PORT: String(TTYD_PORT),
         HIVE_DASHBOARD_TOKEN: '',
@@ -97,6 +97,7 @@ function startProxy() {
         HIVE_ID,
         HIVE_AUTHORIZED_USERS: 'alice:owner',
         NODE_ENV: 'test',
+        ...envOverrides,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -111,12 +112,12 @@ function startProxy() {
 
 // http.request, not fetch: fetch() drops a custom Host header, which would make
 // the proxy see 127.0.0.1 and the whole test pass vacuously.
-function terminalHTTP(cookie, host = HOSTED_HOST, reqPath = '/terminal') {
+function terminalHTTP(cookie, host = HOSTED_HOST, reqPath = '/terminal', port = PROXY_PORT) {
   return new Promise((resolve, reject) => {
     const headers = { Host: host };
     if (cookie !== null) headers.Cookie = `hive_hub_user=${cookie}`;
     const req = httpRequest(
-      { host: '127.0.0.1', port: PROXY_PORT, path: reqPath, method: 'GET', headers },
+      { host: '127.0.0.1', port, path: reqPath, method: 'GET', headers },
       res => { res.resume(); resolve(res.statusCode); },
     );
     req.on('error', reject);
@@ -137,7 +138,7 @@ function terminalWS(cookie, host = HOSTED_HOST) {
   });
 }
 
-let proxy, go, ttyd;
+let proxy, bare, go, ttyd;
 try {
   go = await mockBackend(GO_PORT, 'go');
   ttyd = await mockTtydWS(TTYD_PORT);
@@ -187,9 +188,55 @@ try {
     'a valid hub-signed, per-hive-authorized cookie must still open the WS');
   console.log('  ✓ valid hub-signed + authorized cookie still granted (HTTP + WS)');
 
+  // ── ACCEPTANCE: the live fleet must be protected by the IMAGE ALONE ──────
+  //
+  // The seven currently-exposed spokes are already running. The hive-terminal
+  // Ingress on every one of them is missing its auth-url annotation, and there
+  // is NO code path that ever repairs annotations on an already-provisioned
+  // spoke — the only post-provision Ingress mutation (the vanity-host attach
+  // loop in saas_provision.go) touches spec.rules and TLS hosts, never
+  // metadata.annotations. So this proxy gate is the ONLY containment that
+  // reaches them, and it reaches them purely by the image rolling
+  // (imagePullPolicy: Always) with NO per-spoke config change.
+  //
+  // That makes "the default is safe" a hard requirement, not a nicety: if
+  // .hive.hivecommons.dev were only covered once an operator sets
+  // HIVE_HOSTED_HOST_SUFFIXES, a restarted spoke would still be wide open.
+  //
+  // This probe removes BOTH of the other two things that could mask the
+  // default: no hub secret and no session key (so IS_HOSTED is false), and no
+  // dashboard token. The gate decision is therefore made by the built-in
+  // suffix list and nothing else. In production the boot guard refuses this
+  // very combination, which is exactly why it is only reachable under
+  // NODE_ENV=test — here it is a deliberate isolation of one variable.
+  const BARE_PORT = PROXY_PORT + 10;
+  bare = await startProxy({
+    HIVE_HUB_SECRET: '',
+    HIVE_SESSION_KEY: '',
+    HIVE_SESSION_PUBLIC_KEY: '',
+    HIVE_DASHBOARD_TOKEN: '',
+    HIVE_AUTHORIZED_USERS: '',
+  }, BARE_PORT);
+  await new Promise(r => setTimeout(r, 400));
+
+  assert.equal(await terminalHTTP(null, HOSTED_HOST, '/terminal', BARE_PORT), 401,
+    'the CURRENT hosted apex must be gated by the BUILT-IN suffix list, with HIVE_HOSTED_HOST_SUFFIXES unset — '
+    + 'the live fleet gets no config change, only a new image');
+  assert.equal(await terminalHTTP(null, `${HIVE_ID}.hive.kubestellar.io`, '/terminal', BARE_PORT), 401,
+    'the legacy hosted apex must stay gated by default too');
+  console.log('  ✓ both hosted apexes gated by DEFAULT, no env var set, no hub key, no token');
+
+  // POSITIVE CONTROL: proves the two assertions above are not vacuous — this
+  // stripped proxy really does have an ungated path, and it is the SUFFIX LIST
+  // that is denying, not some unrelated blanket failure.
+  assert.equal(await terminalHTTP(null, 'self-hosted.example.org', '/terminal', BARE_PORT), 200,
+    'control: a genuinely non-hosted, tokenless proxy still serves — so the 401s above came from the suffix match');
+  console.log('  ✓ control: the suffix list is what denies (non-hosted host still 200 here)');
+
   console.log('PASS terminal_hosted_domain.test.js');
 } finally {
   if (proxy) proxy.kill();
+  if (bare) bare.kill();
   if (go) go.close();
   if (ttyd) ttyd.close();
 }
