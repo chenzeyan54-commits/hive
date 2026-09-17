@@ -5351,6 +5351,7 @@ func (s *HubServer) StartLatestSHAPoller(ctx context.Context) {
 	// rate-limited to perHiveEnvMaxPatchesPerCycle patches per cycle, because
 	// each patch rolls that hive's pod. See perhive_env_reconcile.go.
 	s.reconcilePerHiveEnvIfDue()
+	s.reconcileTerminalAuthzIfDue()
 	// Force-delete hive-namespace pods stuck in Terminating past
 	// orphanedPodMinAge with no finalizers and a non-Running phase — the
 	// residue of nodes disappearing without draining (#5328). Throttled
@@ -5416,6 +5417,7 @@ func (s *HubServer) pollLatestSHAsTick(ctx context.Context, now time.Time) {
 	s.sweepStuckAssignmentsIfDue()
 	s.reconcileNetAdminIfDue()
 	s.reconcilePerHiveEnvIfDue()
+	s.reconcileTerminalAuthzIfDue()
 	s.reapOrphanedPodsIfDue()
 	s.retireExpiredGenerationsIfDue()
 	s.sweepExpiredAccessIfDue()
