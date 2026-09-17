@@ -6250,8 +6250,18 @@
       const host = window.location.host;
       return `${proto}//${host}/terminal/?arg=${encodeURIComponent(session)}`;
     }
+    /* The hosted fleet has moved apex once already (hive.kubestellar.io ->
+       hive.hivecommons.dev) and spokes are also served at vanity hostnames, so
+       a single hardcoded suffix silently turns assertion renewal into a no-op
+       on every host it does not know: the 15-minute hive_terminal_assertion
+       then expires with nothing to refresh it and ttyd's next reconnect is
+       rejected. Keep every known hosted apex here, and keep it in step with
+       DEFAULT_HOSTED_SUFFIXES in src/proxy/server.js. */
+    const HOSTED_HIVE_HOST_SUFFIXES = ['.hive.kubestellar.io', '.hive.hivecommons.dev'];
     function isHostedHiveHost() {
-      return (window.location.hostname || '').toLowerCase().endsWith('.hive.kubestellar.io');
+      let host = (window.location.hostname || '').toLowerCase();
+      if (host.endsWith('.')) host = host.slice(0, -1);
+      return HOSTED_HIVE_HOST_SUFFIXES.some(suffix => host.endsWith(suffix));
     }
     async function renewTerminalAssertion() {
       if (!isHostedHiveHost()) return true;
@@ -6274,6 +6284,14 @@
     async function dashboardTokenConfigured() {
       try {
         const r = await fetch('/api/auth/token', { cache: 'no-store' });
+        /* A hosted hive has no shared token at all and answers this endpoint
+           with 404 (see _ensureAuthToken, which reads the same 404 as "hosted
+           hive, no token needed"). Reading every non-OK response as
+           "configured" inverted that on exactly the hives that cannot have a
+           token: when the handoff failed, openTerminal() closed the tab it had
+           just opened instead of falling back to the plain terminal URL, which
+           is what an operator sees as "clicking terminal does nothing". */
+        if (r.status === 404) return false;
         if (!r.ok) return true;
         const d = await r.json().catch(() => ({}));
         return d.configured === true || d.configured === 'true';

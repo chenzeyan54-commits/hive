@@ -566,7 +566,30 @@ function authorizeTerminal(cookieUser, assertionCookie) {
   return isAuthorizedForThisHive(cookieUser);
 }
 
-const HOSTED_SUFFIX = '.hive.kubestellar.io';
+// SECURITY (CWE-862 / CWE-306): the hosted fleet has already been served from
+// more than one apex (hive.kubestellar.io, then hive.hivecommons.dev), and a
+// spoke is additionally reachable at hub-assigned vanity hostnames. A SINGLE
+// hardcoded suffix therefore fails OPEN across a rebrand: isHostedHost()
+// returns false for every host it does not literally name, hosted spokes run
+// with HIVE_DASHBOARD_TOKEN deliberately unset (identity comes from the hub
+// cookie), so `isHosted || DASHBOARD_TOKEN` was false on BOTH halves and the
+// /terminal gate — HTTP handler AND WebSocket upgrade — was skipped entirely.
+// That proxied anonymous internet traffic straight to ttyd: an unauthenticated
+// interactive shell inside a pod holding the GitHub App private key, every
+// agent token and the hub secret.
+//
+// Keep every known hosted apex here, let an operator add more without a rebuild,
+// and — most importantly — treat IS_HOSTED as AUTHORITATIVE (below), so the
+// Host header can never be the thing that decides whether to authenticate.
+const DEFAULT_HOSTED_SUFFIXES = ['.hive.kubestellar.io', '.hive.hivecommons.dev'];
+const HOSTED_SUFFIXES = (() => {
+  const extra = (process.env.HIVE_HOSTED_HOST_SUFFIXES || '')
+    .split(',')
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean)
+    .map(s => (s.startsWith('.') ? s : `.${s}`));
+  return [...new Set([...DEFAULT_HOSTED_SUFFIXES, ...extra])];
+})();
 
 // isHostedHost decides whether the terminal auth gate applies to a request.
 //
@@ -577,11 +600,30 @@ const HOSTED_SUFFIX = '.hive.kubestellar.io';
 // to ttyd. Normalize first: lowercase, drop the port, strip a single trailing
 // dot, THEN suffix-match.
 function isHostedHost(rawHost) {
+  // A hub-provisioned spoke is hosted no matter which hostname it is reached
+  // at — vanity alias, canonical name, a future apex, the raw Service IP, or a
+  // forged/absent Host header. A resolved hub session key (IS_HOSTED) is
+  // something only a hub-provisioned spoke has, and it is not attacker
+  // controlled, so it decides FIRST and the Host header can only ADD hosts, not
+  // remove them. This is what makes an unrecognized host fail CLOSED.
+  if (IS_HOSTED) return true;
   let host = (rawHost || '').toLowerCase();
   const colon = host.indexOf(':');
   if (colon !== -1) host = host.slice(0, colon);
   if (host.endsWith('.')) host = host.slice(0, -1);
-  return host.endsWith(HOSTED_SUFFIX);
+  return HOSTED_SUFFIXES.some(suffix => host.endsWith(suffix));
+}
+
+// terminalGateApplies is the single decision point for "must this /terminal
+// request carry a verified identity?" — shared by the HTTP handler and the
+// WebSocket upgrade so the two can never drift apart again.
+//
+// SECURITY (fail closed): combined with the boot guard immediately below — which
+// refuses to start a proxy that is neither hosted nor token-protected — this is
+// true in EVERY production configuration. There is no host, recognized or not,
+// for which a shipped proxy skips terminal authentication.
+function terminalGateApplies(rawHost) {
+  return isHostedHost(rawHost) || DASHBOARD_TOKEN !== '';
 }
 
 // SECURITY (fail closed on empty dashboard token — CWE-306).
@@ -1091,8 +1133,7 @@ app.use('/terminal', (req, res, next) => {
     return;
   }
   const host = req.headers.host || '';
-  const isHosted = isHostedHost(host);
-  if (isHosted || DASHBOARD_TOKEN) {
+  if (terminalGateApplies(host)) {
     const cookies = parseCookies(req.headers.cookie);
     // SECURITY (CWE-345): terminal access must come from a verified hub cookie
     // or a spoke-minted terminal assertion. The shared dashboard token is never
@@ -1195,29 +1236,25 @@ server.on('upgrade', (req, socket, head) => {
       return;
     }
     const host = req.headers.host || '';
-    const isHosted = isHostedHost(host);
-    if (isHosted) {
+    // SECURITY (CWE-862, finding C3 + follow-up): the upgrade path reaches the
+    // SAME ttyd as the HTTP path, so it must make the SAME decision. It used to
+    // branch `if (isHosted) ... else if (DASHBOARD_TOKEN) ...`, which left a
+    // third, silent case — neither recognized-hosted nor token-protected — that
+    // fell through to ttydProxy.upgrade() with no identity at all. One shared
+    // predicate now covers every configuration, and an unrecognized host lands
+    // in the gated branch rather than past it.
+    if (terminalGateApplies(host)) {
       const cookies = parseCookies(req.headers.cookie);
-      // SECURITY (CWE-345): verify the hub's HMAC signature, not mere existence.
+      // SECURITY (CWE-345): verify the hub's signature, not mere existence.
       const wsUser = resolveTerminalIdentity(cookies);
-      if (!wsUser) {
-        socket.destroy();
-        return;
-      }
-      // SECURITY (CWE-862, finding C3 + follow-up): per-hive authorization on the
-      // WS upgrade, mirroring the HTTP gate. PRIMARY: signed {user,hive,role,exp}
-      // assertion for THIS hive; FALLBACK: #2756 static allowlist + fail-closed.
-      // A hub-authenticated user without a usable grant for THIS hive gets the
-      // socket closed, not a shell.
-      if (!authorizeTerminal(wsUser, cookies[TERMINAL_ASSERTION_COOKIE])) {
-        console.warn(`[terminal-ws] 403: hub user ${JSON.stringify(wsUser)} not authorized for hive ${JSON.stringify(hiveID())}`);
-        socket.destroy();
-        return;
-      }
-    } else if (DASHBOARD_TOKEN) {
-      const cookies = parseCookies(req.headers.cookie);
-      const user = resolveTerminalIdentity(cookies);
-      if (!user || !authorizeTerminal(user, cookies[TERMINAL_ASSERTION_COOKIE])) {
+      // PRIMARY: signed {user,hive,role,exp} assertion for THIS hive;
+      // FALLBACK: #2756 static allowlist + fail-closed. A hub-authenticated
+      // user without a usable grant for THIS hive gets the socket closed, not
+      // a shell.
+      if (!wsUser || !authorizeTerminal(wsUser, cookies[TERMINAL_ASSERTION_COOKIE])) {
+        if (wsUser) {
+          console.warn(`[terminal-ws] 403: hub user ${JSON.stringify(wsUser)} not authorized for hive ${JSON.stringify(hiveID())}`);
+        }
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();
         return;
