@@ -31,6 +31,7 @@ func (s *Server) handleReviewConfigPut(w http.ResponseWriter, r *http.Request) {
 		MaxParallelReviews *int      `json:"max_parallel_reviews"`
 		ReviewerAgents     *[]string `json:"reviewer_agents"`
 		FixerAgent         *string   `json:"fixer_agent"`
+		PublishVerdicts    *bool     `json:"publish_verdicts"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		jsonError(w, "invalid body", http.StatusBadRequest)
@@ -63,6 +64,12 @@ func (s *Server) handleReviewConfigPut(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.FixerAgent != nil {
 		cfg.Review.FixerAgent = strings.TrimSpace(*body.FixerAgent)
+	}
+	// Opt-in verdict publishing (#7469). Owner-only like the rest of this
+	// handler: turning it on causes the hive to write comments on every
+	// reviewed PR in the spoke's repositories.
+	if body.PublishVerdicts != nil {
+		cfg.Review.PublishVerdicts = *body.PublishVerdicts
 	}
 
 	if err := s.saveConfig(); err != nil {

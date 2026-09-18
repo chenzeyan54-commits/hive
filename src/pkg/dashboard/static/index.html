@@ -23389,6 +23389,10 @@ function burnAreaChart() {
             <label>Fixer agent <span class="config-info">i<span class="config-tooltip">The agent kicked to address reviewer findings before re-review.</span></span></label>
             <input type="text" value="${esc(rv.fixer_agent || '')}" placeholder="fixer" data-change-action="markDirty" data-arg0="review" data-arg1="fixer_agent" data-arg-types="s,s,w">
           </div>
+          <div class="config-toggle" style="margin-top:10px">
+            <div class="config-toggle-switch ${rv.publish_verdicts ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="review" data-key="publish_verdicts"></div>
+            <span class="config-toggle-label">Publish reviewer verdicts as PR comments <span class="config-info">i<span class="config-tooltip">When on, the hive posts each reviewer aggregate verdict — findings with their file:line citations, the per-perspective breakdown, and the verdict — as a comment on the reviewed PR. Off by default. The comment is idempotent on the PR's head commit: a re-review edits the existing comment rather than adding another. This does NOT give the reviewer agent GitHub write access; the hive publishes on its behalf using the App token, so the reviewer still cannot approve, merge, label or close anything. Useful on a spoke with no auto-merge, where merge eligibility is never acted on and the verdict would otherwise be invisible.</span></span></span>
+          </div>
         </div>
 
         <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">

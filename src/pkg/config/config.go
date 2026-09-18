@@ -6262,6 +6262,21 @@ type ReviewConfig struct {
 	MaxParallelReviews int      `yaml:"max_parallel_reviews,omitempty" json:"max_parallel_reviews,omitempty"`
 	ReviewerAgents     []string `yaml:"reviewer_agents,omitempty" json:"reviewer_agents,omitempty"`
 	FixerAgent         string   `yaml:"fixer_agent,omitempty" json:"fixer_agent,omitempty"`
+	// PublishVerdicts makes the spoke post each reviewer aggregate verdict as
+	// a PR comment (hivecommons/hive#7469). OFF by default and opt-in per
+	// spoke: nothing starts commenting on anyone's repository until an
+	// operator asks for it.
+	//
+	// This does NOT give the reviewer agent GitHub write access. The reviewer
+	// still only produces review-verdicts.json; the comment is written by the
+	// hive itself using the App token the spoke already holds, so the
+	// reviewer's "a verdict can withhold a merge but never cause one"
+	// asymmetry is untouched.
+	//
+	// It is independent of RequireApproval on purpose. The spokes that need
+	// this most are exactly the ones with no auto-merge, where merge
+	// eligibility — the verdict's only other consumer — is never acted on.
+	PublishVerdicts bool `yaml:"publish_verdicts,omitempty" json:"publish_verdicts,omitempty"`
 }
 
 // AutoMergeConfig gates the App-self-merge sweep (SweepSelfAuthoredAutoMerges).

@@ -144,6 +144,55 @@ calls stay within 25% of the App's hourly REST allowance — a 45-repo hive on a
 fixed 10s tick used to exceed the whole allowance on list calls alone and
 starve every other GitHub caller, including the agents.
 
+## Reviewer verdict publishing (`review.publish_verdicts`)
+
+Hive's reviewer agent produces a **structured verdict**, not a GitHub comment.
+It holds no GitHub write access at all, deliberately: the asymmetry that a
+verdict can withhold a merge but never cause one is what makes the agent safe
+to run unattended. Until an operator opts in, the only consumer of that verdict
+is merge eligibility — `Artifact.HasAggregateApproval` feeding the
+merge-eligible sweep — so on a spoke that runs no auto-merge the verdict
+terminates in a file nobody reads and the reviewer's work is invisible to the
+humans it was meant to help (#7469).
+
+`review.publish_verdicts: true` makes the hive post each current verdict as a
+comment on the PR it judged: the findings with their `file:line` citations, the
+per-perspective breakdown, and the aggregate verdict. The comment states
+plainly that it is advisory.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `review.publish_verdicts` | **off** | Post each reviewer aggregate verdict as a comment on the PR it judged. Opt-in per spoke. Also enables verdict collection on its own, so a spoke can publish without enabling `review.require_approval`. |
+
+Editable without touching this file under **Settings → Governor → Features →
+Review Gate**.
+
+**The reviewer gains nothing by this.** The write is performed by hive itself
+using the GitHub App token the spoke already holds, in
+`Client.PublishReviewVerdict` (`src/pkg/github/review_verdict.go`), reached
+from the governor's eval cycle. Nothing in the publishing path is reachable
+from the reviewer agent's own capabilities, and `reviewer-advisory.md` is
+unchanged: the agent still cannot approve, merge, label, comment or close.
+
+**One comment per PR, forever.** Every published body opens with an invisible
+`<!-- hive:review-verdict -->` marker and carries a second marker naming the
+head commit the verdict judged. On each cycle the publisher looks for its own
+prior marker comment and edits it in place; an unchanged verdict at an
+unchanged head renders a byte-identical body and performs no forge write at
+all. A re-review at a new head **updates** that same comment rather than adding
+another. When the App bot login is known, only the bot's own comments are
+adopted, so a human who quotes the marker is never overwritten.
+
+**Only current verdicts are published.** A verdict whose head SHA does not
+match the PR's current head is skipped entirely, because a stale verdict
+presented as current is worse than no comment — a reader has no way to tell the
+difference. A verdict carrying no head SHA is skipped for the same reason.
+
+**What it does not do.** This publishes verdicts; it does not find duplicate
+PRs. Duplicate detection is a comparison *between* PRs using exactly the intent
+signal the reviewer is designed not to read, so it belongs in a separate
+periodic sweep rather than in the reviewer or in this lane.
+
 ## Image provenance and tags
 
 Pre-built images are published by [`.github/workflows/docker.yml`](../../.github/workflows/docker.yml) to `ghcr.io/hivecommons/hive` (plus `hive-contributor` and `hive-hub`) and mirrored **by digest** into the matching `ghcr.io/kubestellar/*` packages. Post-transfer, `hivecommons` is the native publishing org; the workflow retags the already-built digest into `kubestellar` so that spokes still pinned to the old org keep resolving, and both orgs serve digest-identical manifest lists for the same tag. (A missing cross-org credential is a hard failure in that direction precisely because a one-sided publish would leave `kubestellar` serving stale tags to live spokes.)

@@ -389,19 +389,28 @@ func (c *Client) ProbeIssueWrite(ctx context.Context, repo string, issueNum int)
 }
 
 func truncateDigest(digest string) string {
-	if len(digest) <= githubCommentCharLimit {
-		return digest
+	return truncateComment(digest, "Digest")
+}
+
+// truncateComment clamps any comment body to GitHub's per-comment character
+// limit, cutting on a line boundary and never mid-rune, and appends a footer
+// naming what was truncated. noun is capitalised and used verbatim in that
+// footer so each caller's truncation reads correctly ("Digest truncated: …",
+// "Verdict truncated: …").
+func truncateComment(body, noun string) string {
+	if len(body) <= githubCommentCharLimit {
+		return body
 	}
 	cutoff := githubCommentCharLimit - truncationFooterPadding
-	lastNewline := strings.LastIndex(digest[:cutoff], "\n")
+	lastNewline := strings.LastIndex(body[:cutoff], "\n")
 	if lastNewline > 0 {
 		cutoff = lastNewline
 	}
 	// Ensure cutoff doesn't split a UTF-8 character
-	for cutoff > 0 && !utf8.RuneStart(digest[cutoff]) {
+	for cutoff > 0 && !utf8.RuneStart(body[cutoff]) {
 		cutoff--
 	}
-	return digest[:cutoff] + fmt.Sprintf("\n\n---\n⚠️ *Digest truncated: %d → %d characters (GitHub limit: %d)*\n", len(digest), cutoff, githubCommentCharLimit)
+	return body[:cutoff] + fmt.Sprintf("\n\n---\n⚠️ *%s truncated: %d → %d characters (GitHub limit: %d)*\n", noun, len(body), cutoff, githubCommentCharLimit)
 }
 
 func (c *Client) ensureAdvisoryLabel(ctx context.Context, owner, repo string, issueNum int) {

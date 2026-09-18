@@ -262,3 +262,48 @@ func TestReviewConfigPut_RejectsNonOwner(t *testing.T) {
 		t.Fatal("refused write still flipped require_approval")
 	}
 }
+
+// TestReviewConfigPut_PublishVerdictsIsOptIn covers the #7469 opt-in toggle:
+// it defaults OFF, it is only turned on by an explicit key, and an absent key
+// leaves it alone. Publishing writes comments on an operator's repositories,
+// so "off unless asked" is the contract, not a default.
+func TestReviewConfigPut_PublishVerdictsIsOptIn(t *testing.T) {
+	s := covApiServer(t)
+	if s.deps.Config.Review.PublishVerdicts {
+		t.Fatal("zero-value review config must not publish verdicts")
+	}
+
+	// A write that does not mention the key must not enable it.
+	if rec := doPut(s, "/api/config/review", map[string]any{"fan_out": true}); rec.Code != http.StatusOK {
+		t.Fatalf("put: expected 200, got %d", rec.Code)
+	}
+	if s.deps.Config.Review.PublishVerdicts {
+		t.Fatal("publish_verdicts was enabled by an unrelated write")
+	}
+
+	if rec := doPut(s, "/api/config/review", map[string]any{"publish_verdicts": true}); rec.Code != http.StatusOK {
+		t.Fatalf("put: expected 200, got %d", rec.Code)
+	}
+	if !s.deps.Config.Review.PublishVerdicts {
+		t.Fatal("explicit publish_verdicts:true was not applied")
+	}
+
+	// It must be reachable from the GET the Features tab prefills from.
+	rec := doGetNoRole(s, "/api/config/review")
+	var got struct {
+		PublishVerdicts bool `json:"publish_verdicts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.PublishVerdicts {
+		t.Fatal("GET /api/config/review does not surface publish_verdicts")
+	}
+
+	if rec := doPut(s, "/api/config/review", map[string]any{"publish_verdicts": false}); rec.Code != http.StatusOK {
+		t.Fatalf("put: expected 200, got %d", rec.Code)
+	}
+	if s.deps.Config.Review.PublishVerdicts {
+		t.Fatal("publish_verdicts could not be turned back off")
+	}
+}

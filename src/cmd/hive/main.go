@@ -6104,7 +6104,8 @@ func runEvalCycle(
 	escalatedPRs := runEscalationSweep(ctx, cfg, governorForge(cfg, ghClient, logger), actionable, notifier, dashSrv, logger)
 
 	intentVerdicts := writeIntentVerdicts(ctx, cfg, ghClient, actionable, beadStores, logger)
-	refreshReviewVerdicts(cfg, logger)
+	reviewArtifact := refreshReviewVerdicts(cfg, logger)
+	publishReviewVerdicts(ctx, cfg, ghClient, actionable, reviewArtifact, logger)
 	requiredCheckSet, _ := cfg.AutoMerge.RequiredCheckSet()
 	// The per-PR verdicts come back so the dashboard's PR pills can be
 	// painted from the sweep's own classification rather than a looser
@@ -9367,18 +9368,68 @@ func planReviewDispatch(cfg *config.Config, actionable *github.ActionableResult,
 	return plan
 }
 
-func refreshReviewVerdicts(cfg *config.Config, logger *slog.Logger) {
-	if cfg == nil || !cfg.Review.RequireApproval {
-		return
+// refreshReviewVerdicts re-collects the per-perspective reviewer reports into
+// review-verdicts.json and returns the resulting artifact.
+//
+// It runs when EITHER consumer of the artifact is enabled: the merge gate
+// (review.require_approval) or the verdict publisher (review.publish_verdicts,
+// hivecommons/hive#7469). The publisher is the reason the second condition
+// exists — a spoke with no auto-merge does not enable the merge gate, so
+// without it the artifact would never be refreshed and the publisher would
+// have nothing current to post.
+func refreshReviewVerdicts(cfg *config.Config, logger *slog.Logger) review.Artifact {
+	if cfg == nil || (!cfg.Review.RequireApproval && !cfg.Review.PublishVerdicts) {
+		return review.Artifact{}
 	}
 	artifact, err := review.CollectAndWrite("", "", review.AggregateOptions{})
 	if err != nil {
 		if !os.IsNotExist(err) {
 			logger.Warn("failed to refresh review verdicts", "error", err)
 		}
-		return
+		return review.Artifact{}
 	}
 	logger.Info("review verdict artifact refreshed", "aggregates", len(artifact.Items))
+	return artifact
+}
+
+// publishReviewVerdicts posts each current reviewer verdict as a comment on
+// the PR it judged (hivecommons/hive#7469).
+//
+// OFF BY DEFAULT: it returns immediately unless the operator set
+// review.publish_verdicts on this spoke. The reviewer agent is not involved in
+// the write at any point — it still holds no GitHub write access and gains no
+// new capability here. The hive performs the comment itself with the App token
+// the spoke already holds, which is what preserves the reviewer's
+// "withhold-only" asymmetry while making its output visible to humans.
+//
+// Only verdicts whose head SHA matches the PR's CURRENT head are published:
+// presenting a verdict for a superseded commit as current would be worse than
+// saying nothing, because a reader cannot tell the difference.
+func publishReviewVerdicts(ctx context.Context, cfg *config.Config, ghClient *github.Client, actionable *github.ActionableResult, artifact review.Artifact, logger *slog.Logger) {
+	if cfg == nil || !cfg.Review.PublishVerdicts || ghClient == nil || actionable == nil || len(artifact.Items) == 0 {
+		return
+	}
+	heads := make(map[string]string, len(actionable.PRs.Items))
+	for _, pr := range actionable.PRs.Items {
+		if sha := strings.TrimSpace(pr.HeadSHA); sha != "" {
+			heads[fmt.Sprintf("%s#%d", fullRepoName(pr.Repo, cfg.Project.Org), pr.Number)] = sha
+		}
+	}
+	published := 0
+	for _, agg := range review.SelectPublishable(artifact, heads) {
+		outcome, err := ghClient.PublishReviewVerdict(ctx, agg.Repo, agg.Number, review.RenderVerdictComment(agg))
+		if err != nil {
+			logger.Warn("failed to publish review verdict",
+				"repo", agg.Repo, "pr", agg.Number, "error", err)
+			continue
+		}
+		if outcome != github.ReviewVerdictUnchanged {
+			published++
+		}
+	}
+	if published > 0 {
+		logger.Info("review verdicts published", "comments_written", published)
+	}
 }
 
 func persistReviewDispatchState(plan review.DispatchPlan, delivered []review.DispatchKick, logger *slog.Logger) {
