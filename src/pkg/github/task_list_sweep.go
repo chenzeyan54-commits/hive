@@ -10,6 +10,8 @@ import (
 	"time"
 
 	gh "github.com/google/go-github/v72/github"
+
+	"github.com/hivecommons/hive/pkg/escalation"
 )
 
 // DefaultTaskListSweepMaxCloses caps the closures a single
@@ -42,7 +44,25 @@ const (
 	taskListReasonCommentFailed = "comment-failed"
 	taskListReasonCloseFailed   = "close-failed"
 	taskListReasonPullRequest   = "pull-request"
+	// The two outcomes of the no-task-list path (hivecommons/hive#7641): a
+	// merged `Refs #N` PR's remainder was carried back to the issue, and the
+	// issue either stays actionable or was handed to a human.
+	taskListReasonRefsRemainder  = "refs-remainder"
+	taskListReasonRefsNeedsHuman = "refs-remainder-needs-human"
+	taskListReasonLabelFailed    = "label-failed"
 )
+
+// RefsNeedsHumanMarker is the one explicit form a PR body uses to say that
+// what its `Refs #N` line leaves open can only be finished by a person — an
+// edit the repository's own permission rules put out of every agent's reach,
+// say. It is the label name itself, written anywhere on the `Refs #N` line:
+//
+//	Refs #196 — needs-human: the deny rule lives in .claude/settings.json, which no agent may edit
+//
+// The sweep does not guess this from prose (hivecommons/hive#7641 chose an
+// explicit word over inference): a PR that says the same thing three ways in
+// paragraphs still reads as "next phase", and the issue stays actionable.
+const RefsNeedsHumanMarker = escalation.NeedsHumanLabel
 
 // TaskListSweepOptions mirrors AutoMergeSweepOptions.
 type TaskListSweepOptions struct {
@@ -325,6 +345,14 @@ type mergedPRRef struct {
 	Title    string
 	URL      string
 	MergedAt time.Time
+	// Body is the PR body, kept so the no-task-list path can quote the
+	// "what remains" section (or the `Refs #N` line) back to the issue.
+	Body string
+	// Closing is true when the PR referenced the issue with a closing keyword.
+	// The task-list gate counts both kinds; the remainder comment is only for
+	// the non-closing kind — a merged `Closes #N` has nothing left to say
+	// about what remains.
+	Closing bool
 }
 
 // collectMergedReferencingPRs walks the repo's closed-PR list once per tick
@@ -365,12 +393,15 @@ func (c *Client) collectMergedReferencingPRs(ctx context.Context, displayRepo, o
 			// Both closing refs (Fixes/Closes) and non-closing refs (Refs)
 			// count. #7071 exists precisely because a merged `Refs #N`
 			// leaves the issue open; the sweep must therefore accept it.
-			refs := append(ParseClaimedIssues(text, displayRepo), ParseReferencedIssues(text, displayRepo)...)
+			closing := ParseClaimedIssues(text, displayRepo)
+			refs := append(closing, ParseReferencedIssues(text, displayRepo)...)
 			seen := map[int]bool{}
-			for _, ref := range refs {
+			for i, ref := range refs {
 				if !strings.EqualFold(ref.Repo, displayRepo) {
 					continue
 				}
+				// Closing refs come first, so a PR that both closes and
+				// references the same issue is recorded as closing.
 				if seen[ref.Issue] {
 					continue
 				}
@@ -380,6 +411,8 @@ func (c *Client) collectMergedReferencingPRs(ctx context.Context, displayRepo, o
 					Title:    pr.GetTitle(),
 					URL:      pr.GetHTMLURL(),
 					MergedAt: mergedAt,
+					Body:     pr.GetBody(),
+					Closing:  i < len(closing),
 				})
 			}
 		}
@@ -405,13 +438,17 @@ func (c *Client) trySweepTaskListIssue(ctx context.Context, displayRepo, owner, 
 		return TaskListSweepEvent{}, taskListReasonExempt, nil
 	}
 	body := issue.GetBody()
+	number := issue.GetNumber()
+	mergedRefs := mergedByIssue[number]
+
 	checked, unchecked := countTaskListBoxes(body)
 	if checked+unchecked == 0 {
-		return TaskListSweepEvent{}, taskListReasonNoBoxes, nil
+		// No task list: nothing to tick and nothing to close on, but a merged
+		// `Refs #N` PR still owes the issue its "what remains" section
+		// (hivecommons/hive#7641). The issue is never closed on this path.
+		return c.trySweepRefsRemainder(ctx, displayRepo, owner, repo, issue, mergedRefs)
 	}
-	number := issue.GetNumber()
 
-	mergedRefs := mergedByIssue[number]
 	if len(mergedRefs) == 0 {
 		// #7071 gate: no merged referencing PR ⇒ the task list has not been
 		// answered by anything landed on main yet. A pre-ticked list with no
@@ -534,25 +571,43 @@ func writeMergedList(b *strings.Builder, merged []mergedPRRef) {
 // marker is at the top of every sweep-authored body so the scan is a simple
 // substring check.
 func (c *Client) ensureSweepComment(ctx context.Context, owner, repo string, number int, desiredBody string) error {
-	comments, err := c.listIssueComments(ctx, owner, repo, number)
+	existing, err := c.findSweepComment(ctx, owner, repo, number)
 	if err != nil {
 		return err
 	}
+	// Same body ⇒ already up to date, nothing to do.
+	if existing != nil && existing.GetBody() == desiredBody {
+		return nil
+	}
+	return c.writeSweepComment(ctx, owner, repo, number, existing, desiredBody)
+}
+
+// findSweepComment returns the sweep's marker comment on issue number, or nil
+// when it has not posted one yet.
+func (c *Client) findSweepComment(ctx context.Context, owner, repo string, number int) (*gh.IssueComment, error) {
+	comments, err := c.listIssueComments(ctx, owner, repo, number)
+	if err != nil {
+		return nil, err
+	}
 	for _, cm := range comments {
-		if cm == nil || !strings.Contains(cm.GetBody(), taskListSweepMarker) {
-			continue
+		if cm != nil && strings.Contains(cm.GetBody(), taskListSweepMarker) {
+			return cm, nil
 		}
-		// Same body ⇒ already up to date, nothing to do.
-		if cm.GetBody() == desiredBody {
-			return nil
-		}
-		_, _, err := c.client.Issues.EditComment(ctx, owner, repo, cm.GetID(), &gh.IssueComment{Body: gh.Ptr(desiredBody)})
+	}
+	return nil, nil
+}
+
+// writeSweepComment edits existing in place when it is non-nil, else creates
+// the sweep's marker comment.
+func (c *Client) writeSweepComment(ctx context.Context, owner, repo string, number int, existing *gh.IssueComment, desiredBody string) error {
+	if existing != nil {
+		_, _, err := c.client.Issues.EditComment(ctx, owner, repo, existing.GetID(), &gh.IssueComment{Body: gh.Ptr(desiredBody)})
 		if err != nil {
 			return fmt.Errorf("editing task-list sweep comment on %s/%s#%d: %w", owner, repo, number, err)
 		}
 		return nil
 	}
-	_, _, err = c.client.Issues.CreateComment(ctx, owner, repo, number, &gh.IssueComment{Body: gh.Ptr(desiredBody)})
+	_, _, err := c.client.Issues.CreateComment(ctx, owner, repo, number, &gh.IssueComment{Body: gh.Ptr(desiredBody)})
 	if err != nil {
 		return fmt.Errorf("creating task-list sweep comment on %s/%s#%d: %w", owner, repo, number, err)
 	}

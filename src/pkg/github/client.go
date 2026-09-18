@@ -17,6 +17,7 @@ import (
 
 	gh "github.com/google/go-github/v72/github"
 	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/escalation"
 	"github.com/hivecommons/hive/pkg/ioscan"
 	"github.com/hivecommons/hive/pkg/logscrub"
 )
@@ -786,6 +787,18 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (a
 		}
 
 		if c.isExempt(labels) {
+			continue
+		}
+
+		// needs-human on an ISSUE means the rest of its work is a person's:
+		// a merged `Refs #N` PR said so on its Refs line and the task-list
+		// sweep labelled it (refs_remainder_sweep.go, hivecommons/hive#7641).
+		// It leaves the actionable set the way an escalated PR leaves fix
+		// dispatch, so the 72h merged-claim window is no longer the only thing
+		// between it and a repeat attempt. Not a Hold entry: a hold is a human
+		// checkpoint on hive work, this is human work. The human clears the
+		// label, or closes the issue, when the edits are in.
+		if escalation.HasNeedsHumanLabel(labels) {
 			continue
 		}
 

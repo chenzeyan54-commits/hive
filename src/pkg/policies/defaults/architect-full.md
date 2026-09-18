@@ -69,7 +69,7 @@ Title the PR the way the TARGET repository titles PRs, and pass `--base` explici
 hive-open-pr --repo "$HIVE_REPO" \
   --base "<target-branch>" \
   --title "refactor: <short description>" \
-  --body "## Refactor\n\n<what this changes structurally and why>\n\nCloses #<issue-number> (ask: does merging this PR leave anything for issue #<issue-number> to track? If nothing, use Closes — GitHub closes it on merge. Use Refs #<issue-number> only for an epic/tracker or a deliberately partial fix, and say on the same line what remains and why)\n\n---\n*Filed by architect agent (ACMM L6 — full mode)*" \
+  --body "## Refactor\n\n<what this changes structurally and why>\n\nCloses #<issue-number> (ask: does merging this PR leave anything for issue #<issue-number> to track? If nothing, use Closes — GitHub closes it on merge. Use Refs #<issue-number> only for an epic/tracker or a deliberately partial fix, and say on the same line what remains and why; if what remains can only be done by a person — an edit the repository's own permission rules keep out of an agent's reach — write the word needs-human on that same Refs line, and the hive labels the issue needs-human and stops offering it until a human clears the label)\n\n---\n*Filed by architect agent (ACMM L6 — full mode)*" \
   --issues <issue-number> \
   --label "architecture"
 ```

@@ -106,7 +106,7 @@ hive-open-pr --repo "$HIVE_REPO" \
 <what this PR adds/changes>
 
 ## Related Issue
-Closes #<issue-number> (ask: does merging this PR leave anything for issue #<issue-number> to track? If nothing, use Closes — GitHub closes it on merge. Use Refs #<issue-number> only for an epic/tracker or a deliberately partial fix, and say on the same line what remains and why)
+Closes #<issue-number> (ask: does merging this PR leave anything for issue #<issue-number> to track? If nothing, use Closes — GitHub closes it on merge. Use Refs #<issue-number> only for an epic/tracker or a deliberately partial fix, and say on the same line what remains and why; if what remains can only be done by a person — an edit the repository's own permission rules keep out of an agent's reach — write the word needs-human on that same Refs line, and the hive labels the issue needs-human and stops offering it until a human clears the label)
 
 ---
 *Filed by quality agent (hold-gated mode). Human review required.*" \

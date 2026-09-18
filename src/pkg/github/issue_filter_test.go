@@ -164,6 +164,46 @@ func TestEnumerateActionable_IssueFilterKeepsHold(t *testing.T) {
 // TestSetIssueFilter_NilReceiver: the setter must be nil-receiver safe, like
 // SetRepos/SetExemptLabels — a hive without GitHub credentials runs with a
 // nil *Client and the reload paths call the setter unconditionally.
+// TestEnumerateActionable_NeedsHumanIssueLeavesActionableSet pins the issue
+// half of hivecommons/hive#7641: an issue carrying needs-human — applied by
+// the task-list sweep when a merged `Refs #N` PR said its remainder is a
+// person's — is not offered as work. It is neither actionable nor a Hold
+// entry (a hold is a human checkpoint on hive work; this is human work), and
+// the exclusion is at the choice point, so no downstream consumer can pick
+// it up. Positive control: its unlabelled sibling stays actionable.
+func TestEnumerateActionable_NeedsHumanIssueLeavesActionableSet(t *testing.T) {
+	org, repo := "testorg", "testrepo"
+	issues := []wireIssue{
+		{Number: 196, Title: "remainder is a human's", User: wireUser{"hive-app[bot]"},
+			Labels: []wireLabel{{Name: "security"}, {Name: "needs-human"}}, CreatedAt: hoursAgo(3)},
+		{Number: 197, Title: "still agent work", User: wireUser{"hive-app[bot]"},
+			Labels: []wireLabel{{Name: "security"}}, CreatedAt: hoursAgo(2)},
+	}
+	mux := buildMux(t, org, repo, issues, nil)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	c := newTestClient(t, server, org, []string{repo})
+	result, err := c.EnumerateActionable(context.Background())
+	if err != nil {
+		t.Fatalf("EnumerateActionable: %v", err)
+	}
+	nums := actionableNumbers(result)
+	if !nums[197] {
+		t.Error("positive control failed: issue #197 without needs-human is not actionable")
+	}
+	if nums[196] {
+		t.Error("issue #196 carries needs-human but entered the actionable set — it would be re-offered as fresh work")
+	}
+	if got := result.Issues.Count; got != 1 {
+		t.Errorf("Issues.Count = %d, want 1 (only #197)", got)
+	}
+	for _, h := range result.Hold.Items {
+		if h.Number == 196 {
+			t.Error("issue #196 surfaced in the Hold list; needs-human is human work, not a hive checkpoint")
+		}
+	}
+}
+
 func TestSetIssueFilter_NilReceiver(t *testing.T) {
 	var c *Client
 	c.SetIssueFilter(config.IssueFilterConfig{RequireLabels: []string{"x"}}) // must not panic

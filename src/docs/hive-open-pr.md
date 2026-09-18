@@ -105,6 +105,26 @@ that even a correct `Closes #N` can be downgraded to `Refs #N` by the watcher
 when auto-closing the issue would be unsafe — see
 [Policy gates](#policy-gates-that-change-or-reject-your-request) below.
 
+What the `Refs` line says is carried back to the issue. When the PR merges,
+the hub's task-list sweep posts one comment on a hive-filed issue that has no
+task list, quoting the PR body's remainder section (a heading such as `## What
+remains` or `## What this deliberately leaves undone`) or, failing that, the
+`Refs` line itself; the comment is edited in place on later cycles, never
+duplicated ([#7641](https://github.com/hivecommons/hive/issues/7641)). If
+what remains can only be done by a person — the repository's own
+`permissions.deny` keeps `.claude/settings.json` out of every agent's reach,
+say — write the word `needs-human` on the `Refs` line:
+
+```
+Refs #196 — needs-human: the deny rule lives in .claude/settings.json, which no agent may edit.
+```
+
+The sweep then applies the `needs-human` label to the issue and it leaves the
+actionable set, exactly as an escalated PR leaves fix dispatch, until a human
+removes the label or closes the issue. The word has to be on the `Refs` line:
+the sweep does not infer it from prose, so a PR that explains the same thing
+in three paragraphs leaves the issue in the queue.
+
 Flags `gh` accepts but this path does not need — `--draft`, `--fill`, `--web`,
 `--no-maintainer-edit` — are **accepted and ignored**, so an agent's existing
 command line does not need rewriting. Note that `--draft` being ignored means

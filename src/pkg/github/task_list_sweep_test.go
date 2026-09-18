@@ -82,6 +82,13 @@ type sweepObservations struct {
 	commentsEdited map[int64][]string
 	comments       map[int][]sweepMockComment // issue number → current in-mock comment list
 	nextCommentID  int64
+	labelsAdded    map[int][]string // issue number → labels from each AddLabelsToIssue call, in order
+}
+
+func (o *sweepObservations) labelsAddedTo(n int) []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]string(nil), o.labelsAdded[n]...)
 }
 
 type sweepMockComment struct {
@@ -95,6 +102,7 @@ func newSweepObservations() *sweepObservations {
 		commentsEdited: map[int64][]string{},
 		comments:       map[int][]sweepMockComment{},
 		nextCommentID:  1_000_000,
+		labelsAdded:    map[int][]string{},
 	}
 }
 
@@ -262,6 +270,22 @@ func taskListSweepServer(t *testing.T, org, repo string, issues []taskListSweepF
 				_ = json.NewEncoder(w).Encode(map[string]any{"id": id})
 				return
 			}
+		}
+
+		// POST /issues/{n}/labels — the needs-human label the no-task-list
+		// path applies (hivecommons/hive#7641).
+		if len(parts) == 2 && parts[1] == "labels" && r.Method == "POST" {
+			var names []string
+			_ = json.NewDecoder(r.Body).Decode(&names)
+			obs.mu.Lock()
+			obs.labelsAdded[n] = append(obs.labelsAdded[n], names...)
+			obs.mu.Unlock()
+			wire := make([]map[string]any, 0, len(names))
+			for _, name := range names {
+				wire = append(wire, map[string]any{"name": name})
+			}
+			_ = json.NewEncoder(w).Encode(wire)
+			return
 		}
 
 		if len(parts) == 1 && r.Method == "PATCH" {
