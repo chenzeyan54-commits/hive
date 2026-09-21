@@ -161,6 +161,48 @@ func (c *Config) Validate() error {
 		if err := validateAgentSpecRef(name, agent.AgentSpec); err != nil {
 			return err
 		}
+		standbyFloor := agent.Standby.MinModelCapability
+		if strings.TrimSpace(standbyFloor) == "" {
+			standbyFloor = standbyDefaultMinTier
+		}
+		if !validStandbyTier(standbyFloor) {
+			return fmt.Errorf("agent %s: standby.min_model_capability must be T1, T2, or T3", label)
+		}
+		if agent.Standby.DailyCapPerContributor < 0 {
+			return fmt.Errorf("agent %s: standby.daily_cap_per_contributor must be non-negative", label)
+		}
+		if agent.Standby.Enabled && len(c.Hub.StandbyContributors) == 0 {
+			return fmt.Errorf("agent %s: standby.enabled requires hub.standby_contributors", label)
+		}
+	}
+	if err := validateStandbyHub(c.Hub); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateStandbyHub(h HubConfig) error {
+	seenLogins := map[string]struct{}{}
+	for _, login := range h.StandbyContributors {
+		normalized := normalizeGitHubLogin(login)
+		if normalized == "" || !validGitHubLogin(normalized) {
+			return fmt.Errorf("hub.standby_contributors contains invalid GitHub login %q", login)
+		}
+		if _, ok := seenLogins[normalized]; ok {
+			return fmt.Errorf("hub.standby_contributors contains duplicate GitHub login %q", login)
+		}
+		seenLogins[normalized] = struct{}{}
+	}
+	seenTiers := map[string]struct{}{}
+	for _, entry := range h.StandbyModelTiers {
+		if !validStandbyTier(entry.Tier) {
+			return fmt.Errorf("hub.standby_model_tiers tier must be T1, T2, or T3")
+		}
+		key := standbyModelTierKey(entry)
+		if _, ok := seenTiers[key]; ok {
+			return fmt.Errorf("hub.standby_model_tiers contains duplicate configuration")
+		}
+		seenTiers[key] = struct{}{}
 	}
 	return nil
 }

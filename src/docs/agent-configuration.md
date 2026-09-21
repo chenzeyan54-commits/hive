@@ -172,7 +172,40 @@ spec omits `launch_cmd`, Hive still builds the backend command normally.
                                  #   hive-wide timer. Only effective when the hive-level
                                  #   governor.cadence_scope is also per_repo; see
                                  #   "Repo-scoped cadences" below.
+    standby:
+      enabled: false             # default false; validated only until standby dispatch lands
+      min_model_capability: T1   # default T1; accepted values T1, T2, T3
+      daily_cap_per_contributor: 0 # default 0 — no standby dispatches
 ```
+
+#### Standby contributors
+
+`standby:` is the per-lane configuration surface for
+[RFC #7629 standby contributors](design/standby-contributors.md). In this v6
+stage it is **validation only**: no runtime path reads it and no task is
+offered because of it.
+
+- `enabled: true` requires at least one `hub.standby_contributors` login.
+- `min_model_capability` defaults to `T1` and must be exactly `T1`, `T2`, or
+  `T3`; `unknown` is rejected because unknown never qualifies.
+- `daily_cap_per_contributor` defaults to `0`, and `0` means nothing dispatches.
+
+The hive-wide approved list and model-tier map live under `hub:`:
+
+```yaml
+hub:
+  standby_contributors: [alice, bob]
+  standby_allow_private_repos: false
+  standby_model_tiers:
+    - backend: claude
+      model: claude-opus-5
+      reasoning_effort: high
+      tier: T1
+```
+
+`standby_model_tiers` ships empty on purpose. Owners map the whole reported
+configuration (`backend`, `model`, `reasoning_effort`, optional advisor fields)
+to a tier deliberately; duplicate configuration tuples are a load error.
 
 #### Conversation is not a tier
 

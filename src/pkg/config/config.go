@@ -1043,6 +1043,10 @@ type AgentConfig struct {
 	// and matched org-qualified and case-folded. See agent_repos.go; the
 	// predicate every enforcement point asks is Config.AgentServesRepo.
 	Repos []string `yaml:"repos,omitempty" json:"repos,omitempty"`
+	// Standby controls whether a budget-paused lane may be offered to approved
+	// standby contributors. S2 is validation-only: runtime paths must not read it
+	// until the matching/dispatch phases land.
+	Standby StandbyAgentConfig `yaml:"standby,omitempty" json:"standby,omitempty"`
 	// ReposOwner records WHO set Repos, with the same FieldOwner* vocabulary
 	// as ModelOwner/BackendOwner/PauseOwner. No pack ships a repo scope today,
 	// so nothing reconciles it away today; the marker exists so that one which
@@ -1166,6 +1170,12 @@ type AgentConfig struct {
 	enabledSet bool
 	// name is the YAML map key, set during config load
 	name string
+}
+
+type StandbyAgentConfig struct {
+	Enabled                bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	MinModelCapability     string `yaml:"min_model_capability,omitempty" json:"min_model_capability,omitempty"`
+	DailyCapPerContributor int    `yaml:"daily_cap_per_contributor,omitempty" json:"daily_cap_per_contributor,omitempty"`
 }
 
 // SourceFile returns the per-agent overlay file this entry was loaded from, or
@@ -4147,6 +4157,12 @@ type HubConfig struct {
 	// as ContributeQueueOrder so it survives restart, and edited only through the
 	// authenticated POST /api/contribute/queue/hold endpoint (owner/read-write only).
 	ContributeQueueHold []string `yaml:"contribute_queue_hold,omitempty"`
+	// StandbyContributors is the owner-approved GitHub-login allow-list for
+	// standby contributors. Approval is not volunteering and grants no trust
+	// tier; S2 only validates the list.
+	StandbyContributors      []string           `yaml:"standby_contributors,omitempty"`
+	StandbyModelTiers        []StandbyModelTier `yaml:"standby_model_tiers,omitempty"`
+	StandbyAllowPrivateRepos bool               `yaml:"standby_allow_private_repos,omitempty"`
 	// ContributeQueueHoldReasons is an OPTIONAL parallel map (canonical
 	// "owner/repo#number" key -> short operator note) annotating why an issue in
 	// ContributeQueueHold was parked. It is a companion to — not a replacement for —
@@ -4193,6 +4209,15 @@ type HubConfig struct {
 	SnapshotIntervalMin        int                 `yaml:"snapshot_interval_min"`
 }
 
+type StandbyModelTier struct {
+	Backend         string `yaml:"backend,omitempty" json:"backend,omitempty"`
+	Model           string `yaml:"model,omitempty" json:"model,omitempty"`
+	ReasoningEffort string `yaml:"reasoning_effort,omitempty" json:"reasoning_effort,omitempty"`
+	AdvisorModel    string `yaml:"advisor_model,omitempty" json:"advisor_model,omitempty"`
+	AdvisorEffort   string `yaml:"advisor_reasoning_effort,omitempty" json:"advisor_reasoning_effort,omitempty"`
+	Tier            string `yaml:"tier,omitempty" json:"tier,omitempty"`
+}
+
 // Contribute completion-cooldown defaults and clamp bounds. These live in the
 // config package because both the resolver methods below and the Normalize path
 // reference them; the dashboard keeps its own equal DEFAULT const
@@ -4209,6 +4234,8 @@ const (
 	// rounding to zero.
 	contributeCooldownMinHours = 1
 	contributeCooldownMaxHours = 8760
+	standbyDailyCapMax         = 100
+	standbyDefaultMinTier      = "T1"
 )
 
 // IsContributeCooldownEnabled resolves the effective on/off state of the
@@ -4226,6 +4253,65 @@ func (h HubConfig) IsContributeCooldownEnabled() bool {
 // is withheld until the client accepts the assigned task.
 func (h HubConfig) IsContributeRequireExplicitAccept() bool {
 	return h.ContributeRequireExplicitAccept != nil && *h.ContributeRequireExplicitAccept
+}
+
+func validStandbyTier(tier string) bool {
+	switch strings.TrimSpace(tier) {
+	case "T1", "T2", "T3":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeStandbyContributors(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	seen := map[string]struct{}{}
+	for _, login := range in {
+		normalized := normalizeGitHubLogin(login)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+	return out
+}
+
+func normalizeGitHubLogin(login string) string {
+	return strings.ToLower(strings.TrimSpace(login))
+}
+
+func validGitHubLogin(login string) bool {
+	if len(login) == 0 || len(login) > 39 {
+		return false
+	}
+	if login[0] == '-' || login[len(login)-1] == '-' {
+		return false
+	}
+	for _, r := range login {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func standbyModelTierKey(entry StandbyModelTier) string {
+	return strings.Join([]string{
+		strings.TrimSpace(entry.Backend),
+		strings.TrimSpace(entry.Model),
+		strings.TrimSpace(entry.ReasoningEffort),
+		strings.TrimSpace(entry.AdvisorModel),
+		strings.TrimSpace(entry.AdvisorEffort),
+	}, "\x00")
 }
 
 var defaultContributeDelegatableRoles = []string{"scanner", "quality", "outreach"}
@@ -5162,9 +5248,18 @@ func (c *Config) applyDefaults() {
 		if agent.Role == "" {
 			agent.Role = name
 		}
+		if strings.TrimSpace(agent.Standby.MinModelCapability) == "" {
+			agent.Standby.MinModelCapability = standbyDefaultMinTier
+		} else {
+			agent.Standby.MinModelCapability = strings.TrimSpace(agent.Standby.MinModelCapability)
+		}
+		if agent.Standby.DailyCapPerContributor > standbyDailyCapMax {
+			agent.Standby.DailyCapPerContributor = standbyDailyCapMax
+		}
 		applyKnownAgentDefaults(name, &agent)
 		c.Agents[name] = agent
 	}
+	c.Hub.StandbyContributors = normalizeStandbyContributors(c.Hub.StandbyContributors)
 
 	if len(c.Hub.ContributeDenyTitles) == 0 {
 		c.Hub.ContributeDenyTitles = []string{

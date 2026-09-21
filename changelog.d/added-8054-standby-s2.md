@@ -1,0 +1,1 @@
+- Add validated standby contributor configuration and approved-list schema without runtime behavior. (#8054)
