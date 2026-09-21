@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestACMMPacksLoad(t *testing.T) {
 	packs := ACMMPacks()
@@ -25,7 +28,7 @@ func TestACMMPacksAgentCounts(t *testing.T) {
 	packs := ACMMPacks()
 
 	expected := map[int]int{
-		1: 2, 2: 5, 3: 6, 4: 7, 5: 11, 6: 12,
+		1: 2, 2: 5, 3: 6, 4: 7, 5: 12, 6: 13,
 	}
 	for _, p := range packs {
 		want, ok := expected[p.Level]
@@ -146,16 +149,88 @@ func TestACMMPackManagedAgentNames(t *testing.T) {
 			t.Errorf("not sorted: %q before %q", names[i-1], n)
 		}
 	}
+	inSomePack := make(map[string]bool, len(names))
 	for _, p := range ACMMPacks() {
 		for _, a := range p.Agents {
+			inSomePack[a.Name] = true
 			if !seen[a.Name] {
 				t.Errorf("L%d agent %q missing from the managed set", p.Level, a.Name)
 			}
 		}
 	}
 	// The union must not grow beyond what the packs define: an agent listed
-	// here is one whose operator-set mode a pack apply is allowed to discard.
-	if seen["reviewer"] {
-		t.Errorf("`reviewer` is in no pack yet appears in the managed set")
+	// here is one whose operator-set mode a pack apply is allowed to discard,
+	// so a name that reaches this set without a pack listing it silently hands
+	// the pack authority over a purely operator-owned agent (#7503).
+	for _, n := range names {
+		if !inSomePack[n] {
+			t.Errorf("%q is in no pack yet appears in the managed set", n)
+		}
+	}
+}
+
+// `reviewer` joined the L5 and L6 rosters in #8023 and is managed there and
+// nowhere else: at L1–L4 it stays an opt-in agent an operator creates by hand,
+// which is what keeps its pause state and mode operator-owned below L5.
+func TestReviewerIsInTheHighTrustPacksOnly(t *testing.T) {
+	for _, p := range ACMMPacks() {
+		var reviewer *PackAgent
+		for i, a := range p.Agents {
+			if a.Name == "reviewer" {
+				reviewer = &p.Agents[i]
+			}
+		}
+		if p.Level < 5 {
+			if reviewer != nil {
+				t.Errorf("L%d lists `reviewer`; below L5 it is opt-in only", p.Level)
+			}
+			continue
+		}
+		if reviewer == nil {
+			t.Fatalf("L%d does not list `reviewer`", p.Level)
+		}
+		if reviewer.Role != "reviewer" || reviewer.BeadRole != "worker" {
+			t.Errorf("L%d reviewer: role %q, bead_role %q; want reviewer/worker", p.Level, reviewer.Role, reviewer.BeadRole)
+		}
+		// ADVISORY is the whole point: the reviewer comments and votes on the
+		// queue, it does not open or merge PRs of its own. `converse` is what
+		// lets an ADVISORY agent talk on a PR at all (#4492).
+		if reviewer.Mode != "ADVISORY" {
+			t.Errorf("L%d reviewer: mode = %q, want ADVISORY", p.Level, reviewer.Mode)
+		}
+		if reviewer.Converse == nil || !*reviewer.Converse {
+			t.Errorf("L%d reviewer: converse = %v, want true", p.Level, reviewer.Converse)
+		}
+		if reviewer.KickTemplate != "reviewer-queue.md" {
+			t.Errorf("L%d reviewer: kick_template = %q, want reviewer-queue.md", p.Level, reviewer.KickTemplate)
+		}
+		if reviewer.OnDemand {
+			t.Errorf("L%d reviewer: on_demand is set; it runs on the governor timer", p.Level)
+		}
+		for _, mode := range []string{"surge", "busy", "quiet", "idle"} {
+			raw, ok := p.Governor.Cadences[mode]["reviewer"]
+			if !ok {
+				t.Errorf("L%d: no reviewer cadence in %s", p.Level, mode)
+				continue
+			}
+			cadence := NewIntervalCadence(raw)
+			if cadence.IsPaused() {
+				t.Errorf("L%d %s reviewer cadence is paused; the PR queue is why it is in the pack", p.Level, mode)
+				continue
+			}
+			d, err := time.ParseDuration(cadence.Interval())
+			if err != nil {
+				t.Errorf("L%d %s reviewer cadence %q does not parse: %v", p.Level, mode, raw, err)
+				continue
+			}
+			if d != 30*time.Minute {
+				t.Errorf("L%d %s reviewer cadence = %v, want 30m", p.Level, mode, d)
+			}
+			// A stale timeout at or below the cadence declares the agent dead
+			// between two ordinary kicks.
+			if float64(reviewer.StaleTimeout) <= d.Seconds() {
+				t.Errorf("L%d reviewer: stale_timeout %ds does not exceed the %v cadence", p.Level, reviewer.StaleTimeout, d)
+			}
+		}
 	}
 }

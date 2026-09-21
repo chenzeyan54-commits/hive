@@ -2,8 +2,9 @@ level: 5
 name: Semi-Autonomous
 description: 'Multi-loop feedback (formerly ''Semi-Automated''). Agents open issues AND pull requests. All agent
   PRs get a ''hold'' label automatically — humans batch-review and approve. Adds architect
-  (+architect) for RFCs and strategist (+strategist) for cross-agent coordination.
-  Eleven agents total, including opt-in telemetry and operations. The system proposes; it does not merge autonomously.
+  (+architect) for RFCs and strategist (+strategist) for cross-agent coordination,
+  plus reviewer (+reviewer) to work the hold-gated pull request queue on a 30-minute
+  cadence. Twelve agents total, including opt-in telemetry and operations. The system proposes; it does not merge autonomously.
 
   '
 governor:
@@ -35,6 +36,7 @@ governor:
       sec-check: 4h
       architect: 4h
       strategist: 4h
+      reviewer: 30m
       telemetry: paused
       operations: paused
     busy:
@@ -46,6 +48,7 @@ governor:
       sec-check: 4h
       architect: 4h
       strategist: 4h
+      reviewer: 30m
       telemetry: paused
       operations: paused
     quiet:
@@ -57,6 +60,7 @@ governor:
       sec-check: 4h
       architect: 4h
       strategist: 4h
+      reviewer: 30m
       telemetry: paused
       operations: paused
     idle:
@@ -68,6 +72,7 @@ governor:
       sec-check: 4h
       architect: 4h
       strategist: 4h
+      reviewer: 30m
       telemetry: paused
       operations: paused
 agents:
@@ -281,6 +286,35 @@ agents:
 
     '
   knowledge_use: 'Heavy consumer of all agent knowledge.
+
+    '
+- name: reviewer
+  display_name: reviewer
+  role: reviewer
+  description: 'Works the open pull request queue: reads each PR, posts a review comment
+    a human can act on, and hands the hive a structured verdict. Advisory — it never
+    opens or merges a PR, so it is what makes the hold-gated queue finishable.
+
+    '
+  emoji: 🧐
+  color: '#34495e'
+  sort_order: 35
+  backend: copilot
+  model: claude-sonnet-4-6
+  bead_role: worker
+  mode: ADVISORY
+  # ADVISORY + converse: the reviewer's product is comments and verdicts on
+  # PRs other agents opened, not issues or PRs of its own.
+  converse: true
+  kick_template: reviewer-queue.md
+  include_repos: true
+  stale_timeout: 3600  # 1h — must exceed the 30m cadence
+  interactions: 'Reads the PRs every other agent opens. Produces review comments and
+    verdicts; `requires_human` and `reject` are what put the triage label on a PR.
+
+    '
+  knowledge_use: 'Reads repository conventions and review history. Produces review
+    verdicts.
 
     '
 - name: brainstorm

@@ -2,7 +2,8 @@ level: 6
 name: Fully Autonomous
 description: 'Multi-loop with external orchestration. Agents open issues, create PRs,
   and auto-merge on green CI. No hold label. Adds outreach agent (+outreach) for community
-  engagement and external-facing actions. Twelve agents total, including opt-in telemetry and operations. Highest trust — governor
+  engagement and external-facing actions, and keeps reviewer (+reviewer) on a 30-minute
+  cadence over the pull request queue. Thirteen agents total, including opt-in telemetry and operations. Highest trust — governor
   at fastest cadence.
 
   '
@@ -35,6 +36,7 @@ governor:
       outreach: 30m
       sec-check: 15m
       strategist: 30m
+      reviewer: 30m
       telemetry: paused
       operations: paused
     busy:
@@ -46,6 +48,7 @@ governor:
       outreach: 1h
       sec-check: 30m
       strategist: 1h
+      reviewer: 30m
       telemetry: paused
       operations: paused
     quiet:
@@ -57,6 +60,7 @@ governor:
       outreach: 2h
       sec-check: 1h
       strategist: 2h
+      reviewer: 30m
       telemetry: paused
       operations: paused
     idle:
@@ -68,6 +72,7 @@ governor:
       outreach: 4h
       sec-check: 2h
       strategist: 4h
+      reviewer: 30m
       telemetry: paused
       operations: paused
 agents:
@@ -307,6 +312,36 @@ agents:
 
     '
   knowledge_use: 'Full community knowledge access.
+
+    '
+- name: reviewer
+  display_name: reviewer
+  role: reviewer
+  description: 'Works the open pull request queue: reads each PR, posts a review comment
+    a human can act on, and hands the hive a structured verdict. Advisory even here —
+    it never opens or merges a PR, so its `requires_human` verdict is what pulls one
+    out of the auto-merge lane.
+
+    '
+  emoji: 🧐
+  color: '#34495e'
+  sort_order: 35
+  backend: copilot
+  model: claude-sonnet-4-6
+  bead_role: worker
+  mode: ADVISORY
+  # ADVISORY + converse: the reviewer's product is comments and verdicts on
+  # PRs other agents opened, not issues or PRs of its own.
+  converse: true
+  kick_template: reviewer-queue.md
+  include_repos: true
+  stale_timeout: 3600  # 1h — must exceed the 30m cadence
+  interactions: 'Reads the PRs every other agent opens. Produces review comments and
+    verdicts; `requires_human` and `reject` are what put the triage label on a PR.
+
+    '
+  knowledge_use: 'Reads repository conventions and review history. Produces review
+    verdicts.
 
     '
 - name: brainstorm

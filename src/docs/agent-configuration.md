@@ -445,7 +445,7 @@ You don't have to design a roster. Hive ships six **ACMM packs** (`level-1.yaml`
 
 Applying a level **reconciles the whole roster**, not just the diff: missing agents are created (as overlay files in `/data/agent-configs/`), existing agents are merged — pack values fill blanks, but your explicit `backend:`, `model:`, and `enabled: false` always win — and the level's `kick_template` and `mode` are updated so the agent's *policy* matches the level. A failed agent doesn't abort the rest; the level is only recorded as cleanly applied when every agent reconciled.
 
-The L5 roster is the canonical worked example — eleven agents, eight on the governor timer, two opt-in agents paused in every governor mode, plus one on demand:
+The L5 roster is the canonical worked example — twelve agents, nine on the governor timer, two opt-in agents paused in every governor mode, plus one on demand:
 
 | Agent | | Mode | Cadence (all governor modes) |
 |---|---|---|---|
@@ -457,11 +457,16 @@ The L5 roster is the canonical worked example — eleven agents, eight on the go
 | sec-check 🛡 | CVEs, vulnerabilities | ISSUES_AND_PRS | 4h |
 | architect 🏗 | RFCs, refactors | ISSUES_AND_PRS | 4h |
 | strategist 🧠 | cross-agent coordination | ISSUES_AND_PRS | 4h |
+| reviewer 🧐 | pull request queue review | ADVISORY (+`converse`) | 30m |
 | telemetry 📡 | managed-project instrumentation | ISSUES_AND_PRS | paused |
 | operations 🚨 | managed-project operational practice | ISSUES_AND_PRS | paused |
 | brainstorm 💡 | ideation | ADVISORY | on demand |
 
 At L5, every agent PR gets a `hold` label automatically. The system proposes; it does not merge autonomously.
+
+The reviewer is what makes that hold-gated queue finishable. It joined the L5 and L6 rosters in [#8023](https://github.com/hivecommons/hive/issues/8023) at a 30-minute cadence in every governor mode — the queue is the one lane whose backlog a slower sweep cannot catch up with. It is `mode: ADVISORY` and stays there at L6 too: it opens nothing and merges nothing, it reads open PRs, posts a review comment, and hands the hive a verdict (`reviewer-queue.md`). `converse: true` is what lets an advisory agent write on a PR at all. Below L5 the reviewer is not in any pack — an operator who wants one creates it from the dashboard, and a pack apply leaves that agent's mode, model, backend, and pause state alone.
+
+A hive that already created `reviewer` by hand before L5 keeps it: the pack fills only the fields the operator never claimed. An explicit `converse: false` is a revocation and survives every re-apply.
 
 Telemetry and operations are L5/L6-only agents. They stay absent below L5 and remain paused at L5/L6 until an operator deliberately opts in. Their lane keywords are disjoint: telemetry owns instrumentation and observability terms, while operations owns health, SLO, runbook, incident, rollback, and alerting terms.
 
