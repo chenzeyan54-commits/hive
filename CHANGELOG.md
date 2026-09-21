@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-21 (v4.73.2)
+
+### Security
+
+- Plan review PR links (`pr_url` bead metadata and the `/pull/` external-ref fallback) now pass only `http(s)` URLs — `javascript:`/`data:`/`vbscript:` values are dropped server-side in `childPRURL`, with a matching client-side href guard. (#8037)
+
 ## 2026-09-21 (v4.73.1)
 
 ### Changed
