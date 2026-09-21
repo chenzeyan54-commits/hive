@@ -1,1 +1,0 @@
-- Plan review PR links (`pr_url` bead metadata and the `/pull/` external-ref fallback) now pass only `http(s)` URLs — `javascript:`/`data:`/`vbscript:` values are dropped server-side in `childPRURL`, with a matching client-side href guard. (#8037)
