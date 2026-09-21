@@ -786,6 +786,19 @@ type FrontendPlanning struct {
 	// so nothing will be built until the operator resumes it. The tile shows the
 	// "architect is paused" message when this is set.
 	ArchitectPaused bool `json:"architect_paused"`
+	// Stuck counts plans that have been queued for the architect longer than
+	// planning.DecomposeStuckAfter. They are counted in PendingDecompose too;
+	// this is the subset a human has to unblock, so the tile can stop reporting
+	// them as work in flight (hivecommons/hive#8011).
+	Stuck int `json:"stuck"`
+	// Plans is the same listing GET /api/plans returns, carried on the status
+	// payload so the Repositories card can put a plan-state chip on every issue
+	// pill by joining on issueRepo#issueNumber — without one request per pill
+	// (hivecommons/hive#8011). It is bounded by the number of epics that have
+	// entered the planning flow, which is the same set the Plans modal already
+	// renders in full; it is not truncated, because a truncated list would
+	// silently drop the chip from a planned issue and make the card lie again.
+	Plans []planning.PlanSummary `json:"plans,omitempty"`
 }
 
 type FrontendBudget struct {

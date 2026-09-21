@@ -2,6 +2,7 @@ package planning
 
 import (
 	"sort"
+	"time"
 
 	"github.com/hivecommons/hive/pkg/beads"
 )
@@ -38,27 +39,70 @@ type PlanSummary struct {
 	ChildrenTotal int `json:"childrenTotal"`
 	// ChildrenOpen counts children with status open or in_progress.
 	ChildrenOpen int `json:"childrenOpen"`
+	// Stuck is true when the epic has been queued for the architect for longer
+	// than DecomposeStuckAfter — a queue nothing is draining, which the tile and
+	// the issue pill must show as needing a human rather than as "working"
+	// (hivecommons/hive#8011).
+	Stuck bool `json:"stuck,omitempty"`
+}
+
+// DecomposeStuckAfter is how long an epic may sit decompose_pending before a
+// reader calls it STUCK rather than queued.
+//
+// The architect's cadence is 4h at ACMM L5 (15m at L6), so this is three missed
+// L5 cycles: past it, the epic is not waiting for the next cycle, it is waiting
+// for a person. It exists because "queued" and "nothing will ever happen" look
+// identical on the dashboard today — the PLANNING tile counts a permanently
+// pending epic as work in flight (hivecommons/hive#8011), and while
+// hivecommons/hive#8010 is open that is the NORMAL outcome, not a rare one.
+// When #8010 lands an explicit failure marker, it should feed DecomposeStuck
+// alongside this elapsed-time fallback rather than replacing it: an architect
+// that answers and is never heard from again leaves no marker at all.
+const DecomposeStuckAfter = 12 * time.Hour
+
+// DecomposeStuck reports whether epic is queued for the architect and has been
+// for at least DecomposeStuckAfter, measured from when the epic was minted. A
+// non-pending epic is never stuck — its plan exists, whatever state it is in.
+func DecomposeStuck(epic *beads.Bead, now time.Time) bool {
+	if !DecomposePending(epic) {
+		return false
+	}
+	created := epic.CreatedAt.Time
+	if created.IsZero() {
+		return false
+	}
+	return now.Sub(created) >= DecomposeStuckAfter
 }
 
 // listOrder ranks summaries so human-action-required plans surface first:
-// drafts awaiting review, then epics queued for the architect, then approved
-// (executing) plans.
+// stuck epics (nothing is coming without a person), then drafts awaiting
+// review, then epics still legitimately queued for the architect, then
+// approved (executing) plans.
 func listOrder(p PlanSummary) int {
 	switch {
+	case p.Stuck:
+		return 0 // queued far too long — a human has to look
 	case p.PlanStatus == PlanStatusDraft && !p.PendingDecompose:
-		return 0 // decomposed, awaiting human review
+		return 1 // decomposed, awaiting human review
 	case p.PendingDecompose:
-		return 1 // queued for the architect
+		return 2 // queued for the architect
 	default:
-		return 2 // approved / executing
+		return 3 // approved / executing
 	}
 }
 
 // ListPlans enumerates every plan across the given bead stores: each epic bead
 // that carries a plan_status (set at decompose time, and at mint time for
-// issue-sourced epics). The result is ordered drafts-first (see listOrder),
-// ties broken by title then ID so the listing is stable across refreshes.
+// issue-sourced epics). The result is ordered stuck/drafts-first (see
+// listOrder), ties broken by title then ID so the listing is stable across
+// refreshes.
 func ListPlans(stores map[string]*beads.Store) []PlanSummary {
+	return ListPlansAt(stores, time.Now())
+}
+
+// ListPlansAt is ListPlans with an injected `now`, so the stuck threshold is
+// unit-testable with backdated epics.
+func ListPlansAt(stores map[string]*beads.Store, now time.Time) []PlanSummary {
 	var out []PlanSummary
 	for name, store := range stores {
 		if store == nil {
@@ -94,6 +138,7 @@ func ListPlans(stores map[string]*beads.Store) []PlanSummary {
 				IssueURL:         b.Meta(MetaIssueURL),
 				ChildrenTotal:    total[b.ID],
 				ChildrenOpen:     open[b.ID],
+				Stuck:            DecomposeStuck(b, now),
 			})
 		}
 	}

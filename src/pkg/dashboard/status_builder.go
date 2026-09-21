@@ -1953,6 +1953,17 @@ func buildPlanningAt(stores map[string]*beads.Store, architectPaused bool, acmmL
 	// Only flag the paused-architect condition when it actually matters: there is
 	// queued work AND the architect is paused. Otherwise the tile stays quiet.
 	fp.ArchitectPaused = fp.PendingDecompose > 0 && architectPaused
+
+	// Carry the plan LISTING, not just the counts (hivecommons/hive#8011). The
+	// Repositories card joins it on issueRepo#issueNumber to put a state chip on
+	// each planned issue's pill, and the PLANNING tile reads Stuck off it, so
+	// the count and the list can never disagree about which plans are stuck.
+	fp.Plans = planning.ListPlansAt(stores, now)
+	for _, p := range fp.Plans {
+		if p.Stuck {
+			fp.Stuck++
+		}
+	}
 	return fp
 }
 

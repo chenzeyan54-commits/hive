@@ -89,7 +89,10 @@ A decomposed epic is a **draft**: its child beads are hidden from `Ready()`, so 
 agent can start the work yet. In the plan-review view you can:
 
 - inspect the ordered children with their execution tags (`agent_suitable` /
-  `human_required`) and dependency edges,
+  `human_required`), dependency edges, **who has each task** (the child bead's
+  actor), **its pull request** when a working agent recorded one (`pr_url`, or
+  `pr_repo` + `pr_number`, or an `external_ref` that is itself a PR URL), and a
+  status colour per child,
 - **retag** or **remove** a child before approving,
 - **approve** — releasing the children through `Ready()` so the fleet can claim
   them, or
@@ -106,12 +109,41 @@ The governor's **PLANNING** metric summarizes plan state across all bead stores:
 - **active** — epics that have been decomposed (draft or approved),
 - **review** — drafts awaiting human approval,
 - **queued** — issue-sourced epics not yet built by the architect
-  (`decompose_pending`),
+  (`decompose_pending`) and still inside the stuck threshold,
+- **⚠ stuck** — epics that have been `decompose_pending` for longer than
+  `planning.DecomposeStuckAfter` (12h, three missed architect cycles at ACMM
+  L5). They are excluded from the *queued* suffix on purpose: a queue nothing
+  is draining is not work in flight, and reporting it as such is what hid
+  [#8010](https://github.com/hivecommons/hive/issues/8010) behind a reassuring
+  count,
 - and a **⏸** marker plus a warning tooltip when queued work is blocked on a
   paused architect.
 
+Whenever something is waiting on a *person* — a task list awaiting approval, or
+a stuck epic — the tile turns amber and its tooltip **names** each one instead
+of leaving a bare count to be decoded. The same list leads the **Plans** modal.
+
 When there is no planning activity at all, the tile's tooltip nudges you toward
 the feature: *click ⧉ Plan on any issue, or add the `plan` label on GitHub.*
+
+## Plan state on the issue pill
+
+Once an issue has an epic, the 📋 **Plan this issue** button on its
+Repositories-card pill is replaced by a **state chip** for that epic — the
+linkage and the plan's progress, without opening anything:
+
+| Chip | Meaning |
+|---|---|
+| `⧗ planning` | An epic exists and is queued for the architect to decompose. |
+| `● N tasks · review` | The plan is drafted; its N tasks are withheld from the fleet until you approve it. |
+| `✓ done/total` | Approved and executing — how many of its tasks are finished. |
+| `⚠ stuck` | Queued for the architect past the stuck threshold with nothing built. |
+
+Clicking the chip opens that epic's plan-review view. The chip is drawn from
+the plan listing that rides the `/api/status` payload (`planning.plans`, the
+same set `GET /api/plans` returns), joined onto the pills by
+`issueRepo#issueNumber` — so a card with forty issue pills still makes zero
+extra requests.
 
 ## Configuration reference
 

@@ -2,6 +2,9 @@ package planning
 
 import (
 	"fmt"
+	neturl "net/url"
+	"strconv"
+	"strings"
 
 	"github.com/hivecommons/hive/pkg/agentparse"
 	"github.com/hivecommons/hive/pkg/beads"
@@ -30,6 +33,88 @@ type PlanChild struct {
 	// DependsOn holds the child bead IDs this child depends on. These are the
 	// intra-plan dependency edges for the review DAG.
 	DependsOn []string `json:"dependsOn,omitempty"`
+	// Actor is the bead's actor — the lane the task was decomposed into, and
+	// the agent that picks it up. Surfaced so the review modal can answer "who
+	// has this task", not just "is it open" (hivecommons/hive#8011).
+	Actor string `json:"actor,omitempty"`
+	// PRRef is the pull request a working agent associated with this task, in
+	// "owner/repo#number" form, or "" when none is recorded.
+	PRRef string `json:"prRef,omitempty"`
+	// PRURL is the same pull request's URL when one is recorded directly. It can
+	// be empty while PRRef is set (an agent that recorded repo+number only): a
+	// URL is never synthesized here, because this package does not know the
+	// hive's forge host and a github.com guess would be wrong on GHE.
+	PRURL string `json:"prUrl,omitempty"`
+}
+
+// Metadata keys a WORKING agent (not pkg/planning) may set on a task bead to
+// record the pull request it opened for that task. They are read here, never
+// written: the same free-form convention pkg/retro reads in applyPRMetadata, so
+// the plan review modal and the retro lane agree about where a task's PR is.
+const (
+	// MetaPRURL holds a full pull-request URL.
+	MetaPRURL = "pr_url"
+	// MetaPRRepo / MetaPRNumber hold the same PR as owner/repo plus number.
+	MetaPRRepo   = "pr_repo"
+	MetaPRNumber = "pr_number"
+)
+
+// childPR returns (ref, url) for the pull request associated with a child bead.
+//
+// Three shapes are accepted because three already exist in the wild: pr_url
+// metadata, pr_repo + pr_number metadata, and a bead whose external_ref IS a
+// pull-request URL (how `bd create --external-ref` records one). A URL yields a
+// ref too, parsed from its own path, so the modal can label the link
+// "owner/repo#N" instead of printing a bare URL. Anything unrecognized yields
+// two empty strings rather than a guess.
+func childPR(b *beads.Bead) (ref string, url string) {
+	if u := strings.TrimSpace(b.Meta(MetaPRURL)); prRefFromURL(u) != "" {
+		return prRefFromURL(u), u
+	}
+	if u := strings.TrimSpace(b.ExternalRef); prRefFromURL(u) != "" {
+		return prRefFromURL(u), u
+	}
+	repo := strings.TrimSpace(b.Meta(MetaPRRepo))
+	num := strings.TrimPrefix(strings.TrimSpace(b.Meta(MetaPRNumber)), "#")
+	if repo == "" || num == "" {
+		return "", ""
+	}
+	if n, err := strconv.Atoi(num); err != nil || n <= 0 {
+		return "", ""
+	}
+	return repo + "#" + num, ""
+}
+
+// prRefFromURL extracts "owner/repo#number" from a pull-request URL on ANY
+// forge host (github.com or a GitHub Enterprise instance), by matching on the
+// ".../owner/repo/pull/N" path shape rather than on the host. It returns "" for
+// anything that is not such a URL — including an issue URL, which is what a
+// task bead's external_ref usually holds.
+func prRefFromURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := neturl.Parse(raw)
+	if err != nil || u.Scheme == "" {
+		return ""
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) < 4 {
+		return ""
+	}
+	// Take the LAST .../pull/N (or .../pulls/N) segment pair, so a GHE instance
+	// served from a path prefix still resolves.
+	for i := len(parts) - 2; i >= 1; i-- {
+		if parts[i] != "pull" && parts[i] != "pulls" {
+			continue
+		}
+		n, err := strconv.Atoi(parts[i+1])
+		if err != nil || n <= 0 || i < 2 {
+			return ""
+		}
+		return parts[i-2] + "/" + parts[i-1] + "#" + parts[i+1]
+	}
+	return ""
 }
 
 // PlanTree is the review view of a decomposed epic: the epic plus its children
@@ -92,6 +177,7 @@ func GetPlanTree(store *beads.Store, epicID string) (*PlanTree, error) {
 		Approved:   status == PlanStatusApproved,
 	}
 	for _, c := range childrenOf(store, epicID) {
+		prRef, prURL := childPR(c)
 		tree.Children = append(tree.Children, PlanChild{
 			ID:        c.ID,
 			Title:     c.Title,
@@ -99,6 +185,9 @@ func GetPlanTree(store *beads.Store, epicID string) (*PlanTree, error) {
 			PlanRef:   c.Meta(MetaPlanRef),
 			Status:    c.Status,
 			DependsOn: c.DependsOn,
+			Actor:     c.Actor,
+			PRRef:     prRef,
+			PRURL:     prURL,
 		})
 	}
 	return tree, nil

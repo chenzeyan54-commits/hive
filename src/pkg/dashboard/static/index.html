@@ -1358,6 +1358,12 @@
     .repo-issue-pill-wrap:hover .repo-issue-plan { opacity: 1; }
     .repo-issue-plan:hover { background: color-mix(in srgb, var(--pill-c) 26%, transparent); }
     .repo-issue-plan:disabled { opacity: 0.5; cursor: default; }
+    /* A plan-state chip replaces the 📋 button once the issue HAS an epic
+       (#8011). It is STATE, not an affordance, so unlike the button it is fully
+       opaque without hovering the pill — the whole point is that a planned
+       issue no longer looks identical to an unplanned one. Its colour is the
+       plan's state, passed in as --pill-c by planChipHTML. */
+    .repo-issue-plan.plan-chip { opacity: 1; }
     .repo-pr-pill { --pill-c: var(--purple); text-decoration: none; max-width: 100%; transition: background 0.15s; }
     .repo-pr-pill-wrap { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; min-width: 0; flex: 1 1 100%; }
     .repo-pr-pill-wrap .repo-pr-pill:not(.pill-icon) { min-width: 0; flex: 1 1 auto; overflow: hidden; }
@@ -4847,16 +4853,30 @@
             const awaiting = plan.awaiting_review || 0;
             const pending = plan.pending_decompose || 0;
             const paused = !!plan.architect_paused;
+            // Stuck plans are queued plans nothing is draining (#8011). They
+            // count inside `pending`, so the "+N queued" suffix subtracts them
+            // and shows them separately — a queue that is not moving is not a
+            // queue, and lumping the two together is what made the tile read
+            // "working" while three epics sat unbuilt.
+            const stuck = plan.stuck || 0;
+            const queued = Math.max(0, pending - stuck);
             // Highlight when plans await human review — a human-action-required
             // state, surfaced amber like the "N Issues" / ON HOLD indicators.
-            const planClass = (awaiting > 0 || paused) ? 'gm-alert' : '';
+            const planClass = (awaiting > 0 || stuck > 0 || paused) ? 'gm-alert' : '';
             let planText = `${active}`;
             if (awaiting > 0) planText = `${active} (${awaiting} review)`;
+            if (stuck > 0) planText = `${planText} ⚠${stuck}`;
             if (paused) planText = `⏸ ${planText}`;
             let planTitle = active > 0 ? `${active} active plan(s)` : '';
             if (awaiting > 0) planTitle = `${awaiting} plan(s) awaiting human review — decomposed epic children are withheld until approved`;
             if (paused) planTitle = `⏸ Architect is paused — ${pending} queued plan(s) won't be built until you resume the architect agent.`;
-            else if (pending > 0) planTitle = `${pending} plan(s) queued for the architect to decompose`;
+            else if (queued > 0) planTitle = `${queued} plan(s) queued for the architect to decompose`;
+            if (stuck > 0) planTitle = `${stuck} plan(s) STUCK — queued for the architect 12h+ with nothing built. ` + planTitle;
+            // Name what is waiting on a person, rather than leaving a count to
+            // be decoded. Falls back to the descriptive text above when the
+            // status payload carries no plan listing.
+            const waitingTip = planTileTooltip(plan);
+            if (waitingTip) planTitle = waitingTip + '\n\n' + planTitle;
             // Empty-state discoverability hint when there is no planning activity.
             // Below ACMM L5 the architect that decomposes epics has no cadence, so
             // planning is unavailable — say so instead of pointing at a button we hide.
@@ -4865,7 +4885,7 @@
                 ? 'Break a big issue into a plan → click ⧉ Plan on any issue, or add the `plan` label on GitHub.'
                 : 'Planning needs ACMM level 5+ — the architect that decomposes plans is only scheduled at L5/L6. Raise the level to enable ⧉ Plan and the `plan` label.';
             }
-            return `<div class="gov-metric" style="cursor:pointer" data-action="openPlanList" title="${esc(planTitle + ' — click to open the plan view')}"><span class="gm-label">planning</span><span class="gm-val ${planClass}">${esc(planText)}${pending > 0 ? ` <span style="opacity:0.7;font-size:0.85em">+${pending} queued</span>` : ''}</span></div>`;
+            return `<div class="gov-metric" style="cursor:pointer" data-action="openPlanList" title="${esc(planTitle + ' — click to open the plan view')}"><span class="gm-label">planning</span><span class="gm-val ${planClass}">${esc(planText)}${queued > 0 ? ` <span style="opacity:0.7;font-size:0.85em">+${queued} queued</span>` : ''}</span></div>`;
           })()}
           <div class="oc-gov-gauge">
             <div class="temp-gauge-track" style="background:linear-gradient(to right, var(--green) 0%, var(--green) ${OC_THRESH_QUIET/OC_GAUGE_MAX*100}%, var(--blue) ${OC_THRESH_QUIET/OC_GAUGE_MAX*100}%, var(--blue) ${OC_THRESH_BUSY/OC_GAUGE_MAX*100}%, var(--yellow) ${OC_THRESH_BUSY/OC_GAUGE_MAX*100}%, var(--yellow) ${OC_THRESH_SURGE/OC_GAUGE_MAX*100}%, var(--red) ${OC_THRESH_SURGE/OC_GAUGE_MAX*100}%, var(--red) 100%)">
@@ -7983,12 +8003,19 @@
             const active = plan.active_plans || 0;
             const awaiting = plan.awaiting_review || 0;
             const pending = plan.decomposing || 0;
-            const alertCls = awaiting > 0 ? ' planning-alert' : '';
+            // Stuck epics were queued for the architect and never built (#8011).
+            // They are human-action-required in the same way an unapproved task
+            // list is, so they raise the same amber and are named in the tooltip
+            // rather than being folded into a count that reads as progress.
+            const stuck = plan.stuck || 0;
+            const alertCls = (awaiting > 0 || stuck > 0) ? ' planning-alert' : '';
             const planExplain = 'PLANNING — goals being decomposed into work.\n\nWHAT: The architect agent breaks high-level goals (epics) into a tree of child issues before other agents execute them. Available only at ACMM level 5–6, where the architect is scheduled.\n\nHOW: Counts plan-trees by state from the planning ledger — active (approved, in progress), awaiting review (need your approval before work starts), and decomposing (being broken down now). Amber means human action is required.\n\n';
-            const tip = planExplain + (awaiting > 0
+            const waitingTip = planTileTooltip(plan);
+            const tip = planExplain + (waitingTip ? waitingTip + '\n\n' : '') + (awaiting > 0
               ? `${awaiting} plan(s) awaiting your review — approve them in the plan view before agents start the work`
               : `${active} active plan-tree(s)` + (pending ? `, ${pending} decomposing` : '')) + '\n\nClick to open the plan view.';
-            const valTxt = awaiting > 0 ? `${awaiting} to review` : String(active);
+            let valTxt = awaiting > 0 ? `${awaiting} to review` : String(active);
+            if (stuck > 0) valTxt += ` ⚠${stuck}`;
             return `<div class="gov-stat" style="cursor:pointer" data-action="openPlanList" title="${escapeHtml(tip)}"><div class="label">planning</div><div class="val${alertCls}">${escapeHtml(valTxt)}${pending > 0 ? ` <span style="opacity:.6;font-size:.7em">+${pending}</span>` : ''}</div></div>`;
           })()}
           <div class="gov-stat" title="NEXT RUN — when the governor next wakes up.&#10;&#10;WHAT: The next scheduled moment the governor will re-evaluate mode and kick any agents that are due.&#10;&#10;HOW: Computed from the current mode's cadence schedule — the governor adds the mode's interval to the last run time. Faster modes (busy/surge) produce a nearer next run than idle/quiet."><div class="label">next run</div><div class="val">${escapeHtml(gov.nextKick || '—')}</div></div>
@@ -8196,6 +8223,86 @@
       return ((window._lastStatus && window._lastStatus.acmmLevel) || 0) >= PLANNING_MIN_ACMM_LEVEL;
     }
 
+    // ── Plan-state chips on issue pills (#8011) ──────────────────────────
+    // Before this, an issue looked exactly the same on the Repositories card
+    // before and after it was planned: the only way to find out that an issue
+    // had an epic — and what that epic's plan was doing — was to open the
+    // governor PLANNING tile, then the Plans modal, and hunt for it by hand.
+    //
+    // planIssueIndex joins the plan listing that now rides the status payload
+    // (status.planning.plans, the same set GET /api/plans returns) onto the
+    // pills by "owner/repo#number". Riding the status payload is what keeps
+    // this to zero extra requests: a card with 40 issue pills must not make 40
+    // plan lookups, and it repaints on every governor cycle.
+    function planIssueIndex(status) {
+      const plans = (((status || window._lastStatus || {}).planning) || {}).plans || [];
+      const idx = new Map();
+      for (const p of plans) {
+        if (!p || !p.issueRepo || !p.issueNumber) continue;
+        idx.set((p.issueRepo + '#' + p.issueNumber).toLowerCase(), p);
+      }
+      return idx;
+    }
+
+    // planChipState maps one plan summary to the chip's {label, color, tip}.
+    // Split out from the HTML so the four states are readable as a table and
+    // testable as data. Order matters: stuck wins over pending, because a stuck
+    // plan IS pending — it is the pending case that stopped being normal.
+    function planChipState(p) {
+      const total = p.childrenTotal || 0;
+      const open = p.childrenOpen || 0;
+      const done = Math.max(0, total - open);
+      if (p.stuck) {
+        return { label: '⚠ stuck', color: 'var(--red)',
+          tip: 'Queued for the architect for over 12h with nothing built — this plan needs you, not another cycle. Click to open it.' };
+      }
+      if (p.pendingDecompose) {
+        return { label: '⧗ planning', color: 'var(--blue)',
+          tip: 'An epic exists for this issue and is queued for the architect to break into tasks. Click to open the plan.' };
+      }
+      if (p.planStatus === 'draft') {
+        return { label: '● ' + total + ' task' + (total === 1 ? '' : 's') + ' · review', color: 'var(--yellow)',
+          tip: 'The plan is drafted and its ' + total + ' task(s) are WITHHELD from the fleet until you approve it. Click to review.' };
+      }
+      if (p.planStatus === 'approved') {
+        return { label: '✓ ' + done + '/' + total, color: 'var(--green)',
+          tip: 'Plan approved — ' + done + ' of ' + total + ' task(s) done, ' + open + ' still open. Click to open the plan.' };
+      }
+      return { label: '◇ planned', color: 'var(--purple)',
+        tip: 'This issue has an epic. Click to open its plan.' };
+    }
+
+    // planChipHTML renders the chip that REPLACES the 📋 button on a planned
+    // issue's pill. It opens the plan review for that issue's epic, which is
+    // the linkage the card never showed: this pill belongs to that epic.
+    function planChipHTML(p) {
+      const st = planChipState(p);
+      const title = (p.epicTitle ? p.epicTitle + ' — ' : '') + st.tip;
+      return `<button class="repo-issue-plan plan-chip" data-action="openPlanReview" data-arg0="${esc(p.epicId || '')}" style="--pill-c:${st.color}" title="${esc(title)}" aria-label="${esc('Plan: ' + st.label)}">${esc(st.label)}</button>`;
+    }
+
+    // planWaitingList returns the plans that are waiting on a PERSON, most
+    // urgent first: stuck epics, then task lists awaiting approval. Entries are
+    // {label, title} rather than bare strings so the #7993 Phase 2 design gate
+    // can add "design awaiting approval" rows here without reshaping callers.
+    function planWaitingList(plan) {
+      const plans = (plan && plan.plans) || [];
+      return plans.filter(p => p.stuck).map(p => ({ label: 'stuck — queued for the architect, never built', title: p.epicTitle || p.epicId }))
+        .concat(plans.filter(p => p.planStatus === 'draft' && !p.pendingDecompose)
+          .map(p => ({ label: 'task list awaiting your approval', title: p.epicTitle || p.epicId })));
+    }
+
+    // planTileTooltip NAMES what is waiting on a human, the way the ON HOLD
+    // tile names its items. The PLANNING tile used to show a bare count, which
+    // reads as "N plans are being worked on" when it can equally mean "N plans
+    // have been sitting on your desk since Tuesday" (#8011). Returns '' when
+    // nothing is waiting, so callers keep their existing descriptive tooltip.
+    function planTileTooltip(plan) {
+      const waiting = planWaitingList(plan);
+      if (!waiting.length) return '';
+      return 'Waiting on you:\n' + waiting.map(w => '• ' + w.title + ' — ' + w.label).join('\n');
+    }
+
     function dashboardRoleAtLeast(role, tier) {
       const rank = { 'read': 1, 'read-write': 2, 'merger': 3, 'owner': 4 };
       return (rank[role] || 0) >= (rank[tier] || 0);
@@ -8390,6 +8497,9 @@
       if (_repoResizeDrag) return;
       const el = document.getElementById('repos');
       const showPlan = planningAllowed();
+      // Built once per repaint, not once per pill: the join below runs for
+      // every actionable issue on every card (#8011).
+      const planIdx = planIssueIndex();
       // Definitive single-host badge in the section header: every repo in this
       // hive is on ONE GitHub host (github.com or a GHE instance). Green =
       // github.com, blue = GitHub Enterprise — matches the hub spokes-table pill.
@@ -8453,7 +8563,15 @@
           // decomposition. data-action wires into the delegated click handler.
           // Only rendered at ACMM L5+, where the architect that decomposes the
           // epic is actually scheduled — below that the button is hidden.
-          const planBtn = showPlan ? `<button class="repo-issue-plan pill-icon" data-action="planIssue" data-repo="${esc(repoFull)}" data-number="${i.number}" data-url="${esc(i.url || '')}" data-title="${esc(i.title || '')}" title="Plan this issue" aria-label="Plan this issue">📋</button>` : '';
+          // Once the issue HAS an epic, the button is replaced by a state chip
+          // for that epic (#8011) — the linkage and the plan's progress, on the
+          // pill, instead of an identical-looking 📋 that would mint a second
+          // request for a plan that already exists. The chip is shown whatever
+          // the ACMM level: an epic minted at L5 does not stop existing if the
+          // level later drops, and hiding it would strand the plan.
+          const planned = planIdx.get((repoFull + '#' + i.number).toLowerCase());
+          const planBtn = planned ? planChipHTML(planned)
+            : showPlan ? `<button class="repo-issue-plan pill-icon" data-action="planIssue" data-repo="${esc(repoFull)}" data-number="${i.number}" data-url="${esc(i.url || '')}" data-title="${esc(i.title || '')}" title="Plan this issue" aria-label="Plan this issue">📋</button>` : '';
           return `<span class="repo-issue-pill-wrap"><a class="repo-issue-pill" href="${esc(i.url)}" target="_blank" rel="noopener" title="${esc(tip)}"><span class="pill-num">#${i.number}</span><span class="pill-title">${esc(title)}</span></a>${planBtn}</span>`;
         }).join('');
         // Held issues (hivecommons/hive#7896): in the issue column, because
@@ -16291,10 +16409,37 @@ function burnAreaChart() {
     }
 
     function planStatusBadge(p) {
+      // Stuck is checked first: a stuck plan is also pendingDecompose, and
+      // "queued for architect" is exactly the reassuring label that hid it.
+      if (p.stuck) return '<span style="color:var(--red)">⚠ stuck — queued 12h+, nothing built</span>';
       if (p.pendingDecompose) return '<span style="color:var(--blue)">⧗ queued for architect</span>';
       if (p.planStatus === 'draft') return '<span style="color:var(--yellow)">● awaiting your review</span>';
       if (p.planStatus === 'approved') return '<span style="color:var(--green)">✓ approved</span>';
       return escapeHtml(p.planStatus || '—');
+    }
+
+    // planNeedsHuman reports whether a plan is waiting on a PERSON, as opposed
+    // to waiting on an agent. Drafts need an approval; stuck epics need someone
+    // to work out why nothing was built. Everything else is in flight.
+    function planNeedsHuman(p) {
+      return !!p.stuck || (p.planStatus === 'draft' && !p.pendingDecompose);
+    }
+
+    // planWaitingSummary is the banner at the top of the Plans modal, and the
+    // reason the PLANNING tile's count is no longer a bare number (#8011): a
+    // tile that reads "3" reads as "three plans are being worked on", when it
+    // may mean "three plans have been sitting on your desk since Tuesday".
+    function planWaitingSummary(plans) {
+      const drafts = plans.filter(p => p.planStatus === 'draft' && !p.pendingDecompose).length;
+      const stuck = plans.filter(p => p.stuck).length;
+      if (!drafts && !stuck) return '';
+      const parts = [];
+      if (drafts) parts.push(`<strong>${drafts}</strong> task list${drafts === 1 ? '' : 's'} awaiting your approval`);
+      if (stuck) parts.push(`<strong style="color:var(--red)">${stuck}</strong> stuck`);
+      return `<div style="padding:8px 12px;margin-bottom:10px;border:1px solid var(--border);border-left:3px solid var(--yellow);border-radius:6px">
+        Waiting on you: ${parts.join(' · ')}
+        <div class="muted-note" style="margin-top:2px">Approved task lists release their work to the fleet; stuck plans were queued for the architect and never built.</div>
+      </div>`;
     }
 
     async function openPlanList() {
@@ -16312,7 +16457,10 @@ function burnAreaChart() {
           const issue = p.issueRepo && p.issueNumber
             ? ` <a href="${escapeHtml(p.issueUrl || '#')}" target="_blank" rel="noopener" style="color:var(--muted);font-size:.85em" data-stop="1">${escapeHtml(p.issueRepo)}#${escapeHtml(p.issueNumber)}</a>` : '';
           const kids = p.childrenTotal ? ` · ${p.childrenOpen}/${p.childrenTotal} tasks open` : '';
-          return `<div data-action="openPlanReview" data-arg0="${escapeHtml(p.epicId)}" style="cursor:pointer;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px">
+          // Rows waiting on a PERSON get an accent bar, so the two that need
+          // you are findable in a list of twenty that do not (#8011).
+          const accent = p.stuck ? 'var(--red)' : planNeedsHuman(p) ? 'var(--yellow)' : 'var(--border)';
+          return `<div data-action="openPlanReview" data-arg0="${escapeHtml(p.epicId)}" style="cursor:pointer;padding:10px 12px;border:1px solid var(--border);border-left:3px solid ${accent};border-radius:8px;margin-bottom:8px">
             <div style="display:flex;justify-content:space-between;gap:12px;align-items:baseline">
               <strong>${escapeHtml(p.epicTitle || p.epicId)}</strong>
               <span style="white-space:nowrap;font-size:.85em">${planStatusBadge(p)}</span>
@@ -16320,9 +16468,21 @@ function burnAreaChart() {
             <div class="muted-note" style="margin-top:2px">${escapeHtml(p.epicId)}${issue}${escapeHtml(kids)}</div>
           </div>`;
         }).join('');
-        planShowModal('Plans', rows);
+        planShowModal('Plans', planWaitingSummary(plans) + rows);
       } catch (e) {
         planShowModal('Plans', `<p class="muted-note">Failed to load plans: ${escapeHtml(e.message)}</p>`);
+      }
+    }
+
+    // planChildStatusColor gives each child bead status the colour the rest of
+    // the dashboard already uses for that meaning, so a plan's progress reads
+    // at a glance instead of as a column of identical grey rows (#8011).
+    function planChildStatusColor(status) {
+      switch (String(status || '')) {
+        case 'done': case 'closed': return 'var(--green)';
+        case 'in_progress': return 'var(--blue)';
+        case 'blocked': return 'var(--red)';
+        default: return 'var(--border)';
       }
     }
 
@@ -16343,8 +16503,17 @@ function burnAreaChart() {
               </select>
               <button class="btn" data-action="planChildRemove" data-arg0="${escapeHtml(plan.epicId)}" data-arg1="${escapeHtml(c.id)}" title="Remove this task from the plan">✕</button>`
             : `<span class="muted-note" style="font-size:.85em">${escapeHtml(c.execution || '')}</span>`;
-          return `<div style="display:flex;justify-content:space-between;gap:10px;align-items:center;padding:6px 10px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px">
-            <div><span class="muted-note" style="font-size:.8em">${escapeHtml(c.planRef || '')}</span> ${escapeHtml(c.title)} <span class="muted-note" style="font-size:.8em">[${escapeHtml(String(c.status || ''))}]</span>${deps}</div>
+          // Who has this task, and where the work is (#8011). Both come off the
+          // bead: actor is the lane it was decomposed into, and the PR ref is
+          // whatever the working agent recorded (pr_url / pr_repo+pr_number, or
+          // an external_ref that is itself a PR URL). A ref without a URL is
+          // shown as plain text rather than linked to a guessed host.
+          const who = c.actor ? `<span class="muted-note" style="font-size:.8em"> · @${escapeHtml(c.actor)}</span>` : '';
+          const pr = c.prUrl
+            ? ` <a href="${escapeHtml(c.prUrl)}" target="_blank" rel="noopener" style="font-size:.8em" data-stop="1">${escapeHtml(c.prRef || 'PR')}</a>`
+            : c.prRef ? `<span class="muted-note" style="font-size:.8em"> · ${escapeHtml(c.prRef)}</span>` : '';
+          return `<div style="display:flex;justify-content:space-between;gap:10px;align-items:center;padding:6px 10px;border:1px solid var(--border);border-left:3px solid ${planChildStatusColor(c.status)};border-radius:6px;margin-bottom:6px">
+            <div><span class="muted-note" style="font-size:.8em">${escapeHtml(c.planRef || '')}</span> ${escapeHtml(c.title)} <span style="font-size:.8em;color:${planChildStatusColor(c.status)}">[${escapeHtml(String(c.status || ''))}]</span>${who}${pr}${deps}</div>
             <div style="display:flex;gap:6px;align-items:center;white-space:nowrap">${controls}</div>
           </div>`;
         }).join('') || '<p class="muted-note">No children yet — the architect has not decomposed this epic. Check back once the PLANNING tile stops counting it as queued.</p>';
