@@ -298,11 +298,16 @@ func hiveRows(set *hivectl.ProfileSet) []panes.HiveRow {
 	ordered := set.Ordered()
 	rows := make([]panes.HiveRow, 0, len(ordered))
 	for _, p := range ordered {
+		// The SESSION column is presentational, so it flattens the pointer's
+		// three states (#8127) into two: an absent label and an explicitly
+		// empty one both render as the column's em dash. The distinction only
+		// matters to the relay, which reads the profile rather than this row.
+		label, _ := p.SessionLabel()
 		rows = append(rows, panes.HiveRow{
 			Name:          p.Name,
 			Hub:           p.Hub,
 			ContributorID: p.ContributorID,
-			Session:       p.Session,
+			Session:       label,
 			Active:        active != nil && strings.EqualFold(active.Name, p.Name),
 		})
 	}

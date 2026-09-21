@@ -29,6 +29,11 @@ import (
 // Nothing here touches $HOME or the network: the store is built over t.TempDir
 // and the probe/login/register dependencies are injected.
 
+// sessionPtr spells the three-state session label in a test literal: nil is
+// "absent", sessionPtr("") is the explicit opt-out (#8127). It mirrors the
+// hivectl package's own unexported helper, which is not reachable from here.
+func sessionPtr(label string) *string { return &label }
+
 var hivesKey = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("H")}
 
 func key(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
@@ -54,7 +59,7 @@ func seededHives() *hivectl.ProfileSet {
 		Active:  "acme",
 		Profiles: []hivectl.Profile{
 			{Name: "acme", Hub: "wss://acme.example/contribute", ContributorID: "contrib_a1", RegistrationToken: "tok-acme"},
-			{Name: "other", Hub: "wss://other.example/contribute", ContributorID: "contrib_b2", RegistrationToken: "tok-other", Session: "review"},
+			{Name: "other", Hub: "wss://other.example/contribute", ContributorID: "contrib_b2", RegistrationToken: "tok-other", Session: sessionPtr("review")},
 		},
 	}
 }
@@ -437,7 +442,7 @@ func TestHivesProbesAreDeDuplicatedByHub(t *testing.T) {
 		Active:  "acme",
 		Profiles: []hivectl.Profile{
 			{Name: "acme", Hub: "wss://acme.example/contribute", RegistrationToken: "t1"},
-			{Name: "acme-review", Hub: "wss://acme.example/contribute", RegistrationToken: "t2", Session: "review"},
+			{Name: "acme-review", Hub: "wss://acme.example/contribute", RegistrationToken: "t2", Session: sessionPtr("review")},
 		},
 	}
 	h := newHivesHarness(t, set)
