@@ -297,6 +297,16 @@ agents:
 #     - { backend: claude, model: claude-opus-5,  reasoning_effort: high, tier: T1 }
 #     - { backend: codex,  model: gpt-5.6-terra,  reasoning_effort: high, tier: T2 }
 #
+#   # Which individual items are eligible at which tier. OWNER-AUTHORED and
+#   # empty by default. Each row names either a GitHub issue (repo + number) or
+#   # a source-native item (source_type + external_id). The classifier may
+#   # propose a candidate from label routing, but this list is authoritative
+#   # and a proposal never widens an item into T3 eligibility. The T3 rule is:
+#   # "An item is T3-eligible only if its correctness is established by an
+#   # automated signal a reviewer can read without reconstructing the change."
+#   standby_item_tiers:
+#     - { repo: my-org/repo-a, number: 42, tier: T3 }
+#
 #   # Private repositories are OFF by default. Task context for a private repo
 #   # is read access in substance.
 #   standby_allow_private_repos: false

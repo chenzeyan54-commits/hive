@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/hivecommons/hive/pkg/github"
+	standbypkg "github.com/hivecommons/hive/pkg/standby"
 )
 
 // makeIssue is a helper to build a github.Issue with only the fields relevant
@@ -499,5 +500,24 @@ func TestTierToModel(t *testing.T) {
 		if got != tc.model {
 			t.Errorf("tierToModel(%q): want %q, got %q", tc.tier, tc.model, got)
 		}
+	}
+}
+
+func TestStandbyItemTierProposalFollowsClassification(t *testing.T) {
+	cases := []struct {
+		name  string
+		issue github.Issue
+		want  standbypkg.Tier
+	}{
+		{"simple", makeIssue("Fix typo in README"), standbypkg.T3},
+		{"medium", makeIssue("Improve dashboard error handling"), standbypkg.T2},
+		{"complex label", makeIssue("Investigate issue", "kind/security"), standbypkg.T1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := StandbyItemTierProposal(tc.issue); got != tc.want {
+				t.Errorf("StandbyItemTierProposal = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

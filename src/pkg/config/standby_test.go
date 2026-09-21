@@ -262,6 +262,65 @@ func TestStandby_ModelTiersShipEmpty(t *testing.T) {
 	}
 }
 
+func TestStandby_ItemTiersShipEmpty(t *testing.T) {
+	cfg := mustLoadStandby(t, "", "")
+	if len(cfg.Hub.StandbyItemTiers) != 0 {
+		t.Fatalf("Hub.StandbyItemTiers = %v, want empty — owners opt individual items into standby tiers deliberately",
+			cfg.Hub.StandbyItemTiers)
+	}
+}
+
+func TestStandby_ItemTiersParseAndNormalize(t *testing.T) {
+	cfg := mustLoadStandby(t, "", `  standby_item_tiers:
+    - { repo: MyOrg/Repo-A, number: 17, tier: t3 }
+    - { source_type: linear, external_id: ABC-123, tier: T2 }
+`)
+	if len(cfg.Hub.StandbyItemTiers) != 2 {
+		t.Fatalf("len(StandbyItemTiers) = %d, want 2", len(cfg.Hub.StandbyItemTiers))
+	}
+	first := cfg.Hub.StandbyItemTiers[0]
+	if first.Repo != "myorg/repo-a" || first.Tier != StandbyTierT3 {
+		t.Errorf("entry[0] = %+v, want repo case-folded and tier %q", first, StandbyTierT3)
+	}
+}
+
+func TestStandby_DuplicateItemTierTupleIsLoadError(t *testing.T) {
+	_, err := loadStandby(t, "", `  standby_item_tiers:
+    - { repo: MyOrg/Repo-A, number: 17, tier: T3 }
+    - { repo: myorg/repo-a, number: 17, tier: T1 }
+`)
+	if err == nil {
+		t.Fatal("Load() = nil error, want a load error: one item maps to exactly one tier")
+	}
+	if !strings.Contains(err.Error(), "duplicate") {
+		t.Errorf("error %q does not say the entries are duplicates", err.Error())
+	}
+}
+
+func TestStandby_ItemTierRejectsInvalidTuples(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+	}{
+		{"missing repo", "  standby_item_tiers:\n    - { number: 17, tier: T3 }\n"},
+		{"missing number", "  standby_item_tiers:\n    - { repo: myorg/repo-a, tier: T3 }\n"},
+		{"partial source", "  standby_item_tiers:\n    - { source_type: linear, tier: T2 }\n"},
+		{"unknown tier", "  standby_item_tiers:\n    - { repo: myorg/repo-a, number: 17, tier: unknown }\n"},
+		{"bad tier", "  standby_item_tiers:\n    - { repo: myorg/repo-a, number: 17, tier: gold }\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadStandby(t, "", tc.yaml)
+			if err == nil {
+				t.Fatalf("Load() = nil error for %s, want a load error", tc.name)
+			}
+			if !strings.Contains(err.Error(), "standby_item_tiers") {
+				t.Errorf("error %q does not name hub.standby_item_tiers", err.Error())
+			}
+		})
+	}
+}
+
 func TestStandby_ModelTiersParseAndNormalize(t *testing.T) {
 	cfg := mustLoadStandby(t, "", `  standby_model_tiers:
     - { backend: Claude, model: claude-opus-5, reasoning_effort: HIGH, tier: t1 }
@@ -394,7 +453,7 @@ func TestStandby_AbsentBlockSerializesBackOutAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
-	for _, key := range []string{"standby:", "standby_contributors", "standby_model_tiers", "standby_allow_private_repos", "min_model_capability"} {
+	for _, key := range []string{"standby:", "standby_contributors", "standby_model_tiers", "standby_item_tiers", "standby_allow_private_repos", "min_model_capability"} {
 		if strings.Contains(string(out), key) {
 			t.Errorf("marshalled config contains %q; a hive with no standby block must round-trip unchanged\n%s", key, out)
 		}

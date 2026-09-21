@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/hivecommons/hive/pkg/github"
+	standbypkg "github.com/hivecommons/hive/pkg/standby"
 )
 
 type Tier string
@@ -168,6 +169,21 @@ func Classify(issue github.Issue) Classification {
 	c.ClusterKey = extractClusterKey(titleLower)
 
 	return c
+}
+
+// StandbyItemTierProposal is the classifier's candidate tier for a work item.
+// It is advisory only: the owner-authored standby item list is authoritative,
+// and callers must not use a T3 proposal to widen an item into standby
+// eligibility unless the owner listed that item explicitly.
+func StandbyItemTierProposal(issue github.Issue) standbypkg.Tier {
+	switch Classify(issue).Tier {
+	case TierComplex:
+		return standbypkg.T1
+	case TierSimple:
+		return standbypkg.T3
+	default:
+		return standbypkg.T2
+	}
 }
 
 // labelMatchesRoutingToken reports whether one label routes to a token — a lane

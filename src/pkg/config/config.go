@@ -4300,6 +4300,11 @@ type HubConfig struct {
 	// qualifies, so a hive that has not written this mapping reports "0
 	// qualify" rather than admitting a model nobody assessed.
 	StandbyModelTiers []StandbyModelTier `yaml:"standby_model_tiers,omitempty"`
+	// StandbyItemTiers maps individual work items to the tier a donated
+	// configuration must clear for that item. Owner-authored and empty by
+	// default: the classifier may propose a candidate, but this list is
+	// authoritative and two rows for one item are a load error.
+	StandbyItemTiers []StandbyItemTier `yaml:"standby_item_tiers,omitempty"`
 	// StandbyAllowPrivateRepos opts standby dispatch into private
 	// repositories. Default OFF: a standby contributor receives the full task
 	// context, which for a private repository is read access in substance.

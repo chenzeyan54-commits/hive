@@ -53,6 +53,7 @@ const (
 	// list past these sizes is a generated-file accident, not a hive.
 	standbyContributorsMax = 500
 	standbyModelTiersMax   = 200
+	standbyItemTiersMax    = 1000
 	// githubLoginMaxLen is GitHub's own limit on a login.
 	githubLoginMaxLen = 39
 )
@@ -106,6 +107,32 @@ type StandbyModelTier struct {
 	AdvisorModel           string `yaml:"advisor_model,omitempty" json:"advisor_model,omitempty"`
 	AdvisorReasoningEffort string `yaml:"advisor_reasoning_effort,omitempty" json:"advisor_reasoning_effort,omitempty"`
 	Tier                   string `yaml:"tier" json:"tier"`
+}
+
+// StandbyItemTier is one owner-authored item tier. It is the authoritative
+// list for items whose standby eligibility would otherwise be ambiguous or too
+// cheap to review. The key is source identity when present, else GitHub
+// repo+number; tier is T1/T2/T3 and duplicates are a load error.
+type StandbyItemTier struct {
+	Repo       string `yaml:"repo,omitempty" json:"repo,omitempty"`
+	Number     int    `yaml:"number,omitempty" json:"number,omitempty"`
+	SourceType string `yaml:"source_type,omitempty" json:"source_type,omitempty"`
+	ExternalID string `yaml:"external_id,omitempty" json:"external_id,omitempty"`
+	Tier       string `yaml:"tier" json:"tier"`
+}
+
+// TupleKey renders the item identity as a stable, case-folded key. Source
+// items use source_type+external_id; GitHub issues use repo+number.
+func (t StandbyItemTier) TupleKey() string {
+	source := strings.ToLower(strings.TrimSpace(t.SourceType))
+	external := strings.ToLower(strings.TrimSpace(t.ExternalID))
+	if source != "" || external != "" {
+		return strings.Join([]string{source, external}, "|")
+	}
+	return strings.Join([]string{
+		strings.ToLower(strings.TrimSpace(t.Repo)),
+		fmt.Sprint(t.Number),
+	}, "#")
 }
 
 // TupleKey renders the configuration half of a mapping entry as a stable,
@@ -293,6 +320,15 @@ func (c *Config) applyStandbyDefaults() {
 		}
 		c.Hub.StandbyModelTiers[i] = entry
 	}
+	for i, entry := range c.Hub.StandbyItemTiers {
+		entry.Repo = strings.ToLower(strings.TrimSpace(entry.Repo))
+		entry.SourceType = strings.ToLower(strings.TrimSpace(entry.SourceType))
+		entry.ExternalID = strings.ToLower(strings.TrimSpace(entry.ExternalID))
+		if tier := NormalizeStandbyTier(entry.Tier); tier != "" {
+			entry.Tier = tier
+		}
+		c.Hub.StandbyItemTiers[i] = entry
+	}
 }
 
 // validateStandby is the standby half of Config.Validate. Every rule here is a
@@ -305,6 +341,9 @@ func (c *Config) validateStandby() error {
 		return err
 	}
 	if err := c.validateStandbyModelTiers(); err != nil {
+		return err
+	}
+	if err := c.validateStandbyItemTiers(); err != nil {
 		return err
 	}
 
@@ -398,6 +437,41 @@ func (c *Config) validateStandbyModelTiers() error {
 		if prev, dup := seen[key]; dup {
 			return fmt.Errorf("hub.standby_model_tiers[%d] duplicates entry [%d] (%s/%s) — one configuration maps to exactly one tier",
 				i, prev, entry.Backend, entry.Model)
+		}
+		seen[key] = i
+	}
+	return nil
+}
+
+func (c *Config) validateStandbyItemTiers() error {
+	if len(c.Hub.StandbyItemTiers) > standbyItemTiersMax {
+		return fmt.Errorf("hub.standby_item_tiers has %d entries (maximum %d)", len(c.Hub.StandbyItemTiers), standbyItemTiersMax)
+	}
+	seen := make(map[string]int, len(c.Hub.StandbyItemTiers))
+	for i, entry := range c.Hub.StandbyItemTiers {
+		hasSource := strings.TrimSpace(entry.SourceType) != "" || strings.TrimSpace(entry.ExternalID) != ""
+		if hasSource {
+			if strings.TrimSpace(entry.SourceType) == "" || strings.TrimSpace(entry.ExternalID) == "" {
+				return fmt.Errorf("hub.standby_item_tiers[%d]: source_type and external_id must be set together", i)
+			}
+		} else {
+			if strings.TrimSpace(entry.Repo) == "" {
+				return fmt.Errorf("hub.standby_item_tiers[%d]: repo is required for a GitHub issue entry", i)
+			}
+			if entry.Number <= 0 {
+				return fmt.Errorf("hub.standby_item_tiers[%d] (%s): number must be positive", i, entry.Repo)
+			}
+		}
+		if !IsStandbyTier(entry.Tier) {
+			if strings.EqualFold(strings.TrimSpace(entry.Tier), StandbyTierUnknown) {
+				return fmt.Errorf("hub.standby_item_tiers[%d]: tier must not be %q — unknown items are not standby-eligible", i, entry.Tier)
+			}
+			return fmt.Errorf("hub.standby_item_tiers[%d]: invalid tier %q (must be %s, %s or %s)",
+				i, entry.Tier, StandbyTierT1, StandbyTierT2, StandbyTierT3)
+		}
+		key := entry.TupleKey()
+		if prev, dup := seen[key]; dup {
+			return fmt.Errorf("hub.standby_item_tiers[%d] duplicates entry [%d] — one item maps to exactly one tier", i, prev)
 		}
 		seen[key] = i
 	}

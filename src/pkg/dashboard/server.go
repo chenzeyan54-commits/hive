@@ -1904,7 +1904,7 @@ func (s *Server) UpdateStatusIfFresh(status *StatusPayload, buildEpoch uint64) b
 	}
 	status.ContributorPool = s.BuildContributorPoolStatus()
 	if s.contributeHub != nil {
-		status.Governor.QualifiedStandbys = s.contributeHub.QualifiedStandbyCounts(status.Governor.SuppressedLanes)
+		status.Governor.QualifiedStandbys = s.contributeHub.QualifiedStandbyCounts(status.Governor.SuppressedLanes, status.Repos)
 	}
 
 	s.githubAppMu.RLock()

@@ -17,6 +17,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/hivecommons/hive/pkg/advisory"
+	"github.com/hivecommons/hive/pkg/classify"
 	"github.com/hivecommons/hive/pkg/config"
 	ghpkg "github.com/hivecommons/hive/pkg/github"
 	standbypkg "github.com/hivecommons/hive/pkg/standby"
@@ -2511,12 +2512,14 @@ func normalizeStandbyLanes(lanes []string) []string {
 	return out
 }
 
-func (h *ContributeWSHub) QualifiedStandbyCounts(lanes []string) map[string]int {
+func (h *ContributeWSHub) QualifiedStandbyCounts(lanes []string, repos []FrontendRepo) map[string]int {
 	if h == nil || h.server == nil || h.server.deps == nil || h.server.deps.Config == nil || len(lanes) == 0 {
 		return nil
 	}
 	cfg := h.server.deps.Config
 	tiers := standbyTierMapFromConfig(cfg.Hub.StandbyModelTiers)
+	itemTiers := standbyItemTierMapFromConfig(cfg.Hub.StandbyItemTiers)
+	itemsByLane := standbyItemsByLane(cfg, repos, len(itemTiers) == 0)
 	out := make(map[string]int, len(lanes))
 	now := time.Now()
 	h.mu.RLock()
@@ -2554,9 +2557,82 @@ func (h *ContributeWSHub) QualifiedStandbyCounts(lanes []string) map[string]int 
 				},
 			})
 		}
-		out[lane] = standbypkg.QualifiedCount(candidates, policy, tiers, now)
+		if len(itemTiers) == 0 {
+			// S7 is opt-in. With no owner-authored item list, use the weakest
+			// item floor so the S4 lane-only result is reproduced exactly.
+			out[lane] = standbypkg.QualifiedCount(candidates, policy, standbypkg.T3, tiers, now)
+			continue
+		}
+		count := 0
+		for _, candidate := range candidates {
+			for _, item := range itemsByLane[lane] {
+				itemTier := itemTiers[itemKey(item)]
+				if itemTier == standbypkg.TierUnknown {
+					proposal := classify.StandbyItemTierProposal(item)
+					// A T3 proposal widens standby to cheap review work; only
+					// the owner-authored list may do that.
+					if proposal == standbypkg.T3 {
+						continue
+					}
+					itemTier = proposal
+				}
+				if ok, _ := standbypkg.Qualifies(candidate, policy, itemTier, tiers, now); ok {
+					count++
+					break
+				}
+			}
+		}
+		out[lane] = count
 	}
 	return out
+}
+
+func standbyItemsByLane(cfg *config.Config, repos []FrontendRepo, legacy bool) map[string][]ghpkg.Issue {
+	out := make(map[string][]ghpkg.Issue)
+	if cfg == nil || legacy {
+		return out
+	}
+	for _, repo := range repos {
+		for _, raw := range repo.ActionableIssues {
+			issue, ok := raw.(ghpkg.Issue)
+			if !ok {
+				continue
+			}
+			lane := issue.Lane
+			if lane == "" {
+				lane = string(classify.Classify(issue).Lane)
+			}
+			for agentName := range cfg.Agents {
+				if agentName == lane || (lane == "" && agentName != "scanner") || (agentName == "scanner" && lane == string(classify.LaneScanner)) {
+					out[agentName] = append(out[agentName], issue)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func standbyItemTierMapFromConfig(entries []config.StandbyItemTier) map[string]standbypkg.Tier {
+	out := make(map[string]standbypkg.Tier, len(entries))
+	for _, entry := range entries {
+		key := ""
+		if entry.SourceType != "" || entry.ExternalID != "" {
+			key = strings.ToLower(strings.TrimSpace(entry.SourceType)) + "|" + strings.ToLower(strings.TrimSpace(entry.ExternalID))
+		} else {
+			key = strings.ToLower(strings.TrimSpace(entry.Repo)) + "#" + strconv.Itoa(entry.Number)
+		}
+		if key != "" {
+			out[key] = standbypkg.NormalizeTier(entry.Tier)
+		}
+	}
+	return out
+}
+
+func itemKey(issue ghpkg.Issue) string {
+	if issue.SourceType != "" || issue.ExternalID != "" {
+		return strings.ToLower(strings.TrimSpace(issue.SourceType)) + "|" + strings.ToLower(strings.TrimSpace(issue.ExternalID))
+	}
+	return strings.ToLower(strings.TrimSpace(issue.Repo)) + "#" + strconv.Itoa(issue.Number)
 }
 
 func standbyTierMapFromConfig(entries []config.StandbyModelTier) standbypkg.TierMap {

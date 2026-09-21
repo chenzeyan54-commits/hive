@@ -759,7 +759,12 @@ Both polarities are enforced at **enumeration** — the point where GitHub issue
 
 ## Standby contributors (`standby`)
 
-> **Configuration only.** Hive parses, defaults and validates this block today, and **nothing reads it** — no lane offers work, no relay stands by, no tile counts anybody. It is step S2 of [RFC #7629](https://github.com/hivecommons/hive/issues/7629); the pause signal, the relay's standby mode, matching and dispatch are later phases. The full plan, and the reasoning behind every rule below, is in [the standby design record](design/standby-contributors.md). Writing the block now is safe and changes no behaviour; a hive that writes nothing is unaffected byte for byte.
+> **Partly shipped.** Hive parses, defaults and validates this block, and the
+> paused-lane "M qualify" count reads the approved contributor, model-tier and
+> item-tier lists. Dispatch is still a later phase, and `daily_cap_per_contributor:
+> 0` still means nothing is dispatched. The full plan, and the reasoning behind
+> every rule below, is in [the standby design record](design/standby-contributors.md).
+> A hive that writes nothing is unaffected byte for byte.
 
 The idea: when a lane pauses because the hive is **out of budget**, its queue can be offered to contributors who volunteered ahead of time and whom you approved — running their own agent, on their own machine, with their own model, handing the result back as an ordinary hold-gated PR. No credential moves. The risk the design is built around is that donating a frontier model costs real money and donating a cheap one costs nearly nothing, so the pool tends toward cheap models and an owner staring at a stuck queue gets tempted to lower the bar until something qualifies. Hence a **floor**, per lane.
 
@@ -776,6 +781,8 @@ hub:
   standby_model_tiers:                 # owner-authored; Hive ships NO defaults
     - { backend: claude, model: claude-opus-5, reasoning_effort: high, tier: T1 }
     - { backend: codex,  model: gpt-5.6-terra, reasoning_effort: high, tier: T2 }
+  standby_item_tiers:                  # owner-authored; empty default
+    - { repo: my-org/repo-a, number: 42, tier: T3 }
   standby_allow_private_repos: false   # default off
 ```
 
@@ -786,6 +793,7 @@ hub:
 | `standby.daily_cap_per_contributor` | How many donated tasks one approved contributor may be dispatched on this lane per rolling day. Default **0**, and 0 means *nothing is dispatched* — which is what makes the block safe to adopt before the dispatch path exists. Negative fails the load; a value above 50 is clamped with a logged warning. |
 | `hub.standby_contributors` | The approved GitHub logins. Approval is durable and lives in config; a relay declaring standby is *volunteering*, which grants nothing. A login here grants nothing else either: not a trust tier, not a role, not a credential. |
 | `hub.standby_model_tiers` | Which contributor model configurations count as which tier. Owner-authored, and **Hive publishes no defaults**: an unmapped configuration is `unknown`, and `unknown` never clears any floor, so a hive that has not written this mapping reports "0 qualify" rather than admitting a model nobody assessed. The **whole** configuration is the key — `backend`, `model`, `reasoning_effort`, and the optional `advisor_model` / `advisor_reasoning_effort`, which are the five fields a relay already reports — so the same model at a different reasoning effort is a different entry, and two entries for one configuration are a load error rather than last-one-wins. `backend` and `model` are required on every entry: an entry without a model would be a wildcard over every model on that backend, which is the opposite of matching a configuration. |
+| `hub.standby_item_tiers` | Which individual items may be matched at which tier. The list is owner-authored and **empty by default**. Each entry names either a GitHub issue (`repo` + `number`) or a source item (`source_type` + `external_id`) plus `tier: T1`, `T2` or `T3`; duplicate item tuples fail the load. The classifier may propose a candidate tier from label routing, but this list is authoritative and a proposal never widens an item into T3 eligibility. The verifiability rule is: **"An item is T3-eligible only if its correctness is established by an automated signal a reviewer can read without reconstructing the change."** |
 | `hub.standby_allow_private_repos` | Whether standby may be offered work in private repositories. **Default off.** A standby contributor receives the full task context — issue title, body, labels, the lane's policy text — which for a private repository is read access in substance. Approve only people you would give read access to. |
 
 ### The floor is read-only, everywhere

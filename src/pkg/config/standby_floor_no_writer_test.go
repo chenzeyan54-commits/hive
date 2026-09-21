@@ -34,6 +34,7 @@ import (
 const (
 	standbyFloorGoField = "MinModelCapability"
 	standbyFloorWireKey = "min_model_capability"
+	standbyItemTiersKey = "standby_item_tiers"
 )
 
 // standbyFloorScanRoots are the trees a surface could live in, relative to
@@ -85,6 +86,9 @@ func TestStandbyFloorHasNoWriterOutsideConfig(t *testing.T) {
 			if strings.Contains(body, standbyFloorWireKey) {
 				offenders = append(offenders, rel+": mentions the wire key "+standbyFloorWireKey)
 			}
+			if strings.Contains(body, standbyItemTiersKey) {
+				offenders = append(offenders, rel+": mentions the wire key "+standbyItemTiersKey)
+			}
 			if line, ok := standbyFloorAssignment(body); ok {
 				offenders = append(offenders, rel+": assigns "+standbyFloorGoField+" — "+line)
 			}
@@ -120,6 +124,9 @@ func TestStandbyFloorIsOwnedByConfig(t *testing.T) {
 	}
 	if !strings.Contains(body, standbyFloorWireKey) {
 		t.Errorf("pkg/config/standby.go does not mention %s; the no-writer guard is scanning for a dead string", standbyFloorWireKey)
+	}
+	if !strings.Contains(body, standbyItemTiersKey) {
+		t.Errorf("pkg/config/standby.go does not mention %s; the no-writer guard is scanning for a dead string", standbyItemTiersKey)
 	}
 	// And the defaults pass is the writer the exception exists for.
 	if _, ok := standbyFloorAssignment(body); !ok {

@@ -36,6 +36,10 @@ const (
 	// it, so it clears nothing. This is the out-of-the-box answer on a hive
 	// that has not written the mapping.
 	ReasonConfigurationUnknown Reason = "configuration_unknown"
+	// ReasonItemTierUnknown: the item has no authoritative or fail-closed
+	// tier. Unknown items are not standby-eligible at all; the caller may keep
+	// reporting the lane as paused with zero qualified donors.
+	ReasonItemTierUnknown Reason = "item_tier_unknown"
 	// ReasonBelowFloor: the configuration's tier is weaker than the lane's
 	// capability floor. It carries no floor value on purpose.
 	ReasonBelowFloor Reason = "below_floor"
@@ -106,11 +110,18 @@ type LanePolicy struct {
 //
 // Returning false is a normal outcome, not an error. A lane on which no
 // candidate qualifies stays paused, reports zero, and offers no next step.
-func Qualifies(c Candidate, p LanePolicy, tiers TierMap, now time.Time) (bool, Reason) {
+func Qualifies(c Candidate, p LanePolicy, item Tier, tiers TierMap, now time.Time) (bool, Reason) {
 	// The floor itself must be a real tier. Fail closed if it is not.
 	floor := NormalizeTier(string(p.Floor))
 	if !floor.Known() {
 		return false, ReasonFloorUnknown
+	}
+	item = NormalizeTier(string(item))
+	// Unknown items are explicitly out before any arithmetic. Without this
+	// guard they would fall through as "below_floor", which is not the rule:
+	// an item nobody made eligible is not standby work at all.
+	if !item.Known() {
+		return false, ReasonItemTierUnknown
 	}
 	if !c.Approved {
 		return false, ReasonNotApproved
@@ -123,7 +134,7 @@ func Qualifies(c Candidate, p LanePolicy, tiers TierMap, now time.Time) (bool, R
 	if !tier.Known() {
 		return false, ReasonConfigurationUnknown
 	}
-	if tier.strength() < floor.strength() {
+	if tier.strength() < floor.strength() || tier.strength() < item.strength() {
 		return false, ReasonBelowFloor
 	}
 	if CapRemaining(c, p, now) <= 0 {
@@ -137,10 +148,10 @@ func Qualifies(c Candidate, p LanePolicy, tiers TierMap, now time.Time) (bool, R
 //
 // It is a plain count over Qualifies with no side effect. A count of zero is a
 // terminal, acceptable state: the lane stays paused and nothing is proposed.
-func QualifiedCount(candidates []Candidate, p LanePolicy, tiers TierMap, now time.Time) int {
+func QualifiedCount(candidates []Candidate, p LanePolicy, item Tier, tiers TierMap, now time.Time) int {
 	n := 0
 	for _, c := range candidates {
-		if ok, _ := Qualifies(c, p, tiers, now); ok {
+		if ok, _ := Qualifies(c, p, item, tiers, now); ok {
 			n++
 		}
 	}

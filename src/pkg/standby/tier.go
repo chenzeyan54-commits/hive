@@ -22,9 +22,8 @@
 //     value here can tell a caller "you would qualify at T3" — the strength
 //     ordering is deliberately unexported so no surface can render a gap.
 //
-// This is step S4 of the design's phase map. Item-tier matching (S7) threads a
-// second tier into the decision; the lane-level rules below are unchanged by
-// it.
+// This package started as S4 of the design's phase map; S7 adds the item tier
+// as a second required floor. The lane-level rules below are unchanged by it.
 package standby
 
 import (
