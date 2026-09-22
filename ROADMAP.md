@@ -228,14 +228,16 @@ discipline):
   advisory context) to contributor agents as a Model Context Protocol
   endpoint, so the environment is queried rather than pasted into prompts
   ([#8033](https://github.com/hivecommons/hive/issues/8033),
-  [design doc](src/docs/design/task-mcp.md)). **Merged on `v6`**
+  [design doc](https://github.com/hivecommons/hive/blob/v6/src/docs/design/task-mcp.md)).
+  **Merged on `v6`**
   ([#8164](https://github.com/hivecommons/hive/pull/8164)): `pkg/taskmcp`,
   the dashboard endpoint, and agent-manager wiring.
 - **Standby contributors** — a lane paused for budget hands its queue to
   volunteer contributors, behind a model floor
   ([#7629](https://github.com/hivecommons/hive/issues/7629),
-  [design doc](src/docs/design/standby-contributors.md),
-  [RFC doc](docs/rfc-7629-standby-contributors.md)). **Design S0 merged on
+  [design doc](https://github.com/hivecommons/hive/blob/v6/src/docs/design/standby-contributors.md),
+  [RFC doc](https://github.com/hivecommons/hive/blob/v6/docs/rfc-7629-standby-contributors.md)).
+  **Design S0 merged on
   `v6`** ([#8038](https://github.com/hivecommons/hive/pull/8038));
   implementation not started.
 - Named for later, not scheduled: Jira (mirroring the Linear agent), an
