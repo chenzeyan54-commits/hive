@@ -259,6 +259,26 @@ discipline):
   matcher, manual dispatch, outcome ledger and suspend rule, item-tier
   matching: [#8083](https://github.com/hivecommons/hive/pull/8083)–[#8163](https://github.com/hivecommons/hive/pull/8163)).
   S8 waits on live-hive runbook evidence.
+- **Long-running runs** — archetypes for tasks that outlive a single kick,
+  admission of external multi-stage workflows through the existing
+  contributor protocol, and Spektacular's spec/plan/implement pipeline
+  under Hive orchestration, gathered as one design under umbrella epic
+  [#8290](https://github.com/hivecommons/hive/issues/8290) (constituents:
+  [#7620](https://github.com/hivecommons/hive/issues/7620) vocabulary,
+  [#8201](https://github.com/hivecommons/hive/issues/8201) admission
+  contract, [#8227](https://github.com/hivecommons/hive/issues/8227)
+  product scope). **Planning accepted, implementation not started**: the
+  #8201 Gate 0 option is decided (contributor protocol plus a durable
+  external-execution binding, one bounded workflow, report-only — decision
+  record tracked in
+  [#8302](https://github.com/hivecommons/hive/issues/8302)), the first
+  proving workload is a report-only audit campaign, and two
+  convergence-layer defects
+  ([#8287](https://github.com/hivecommons/hive/issues/8287),
+  [#8288](https://github.com/hivecommons/hive/issues/8288)) are
+  prerequisites. The release line is still to be assigned by maintainers —
+  the constituents span v5 protocol seams and v6 surfaces; it is listed
+  here because the v6 readiness bar is its stated measuring stick.
 - Named for later, not scheduled: Jira (mirroring the Linear agent), an
   IDE extension over the dashboard API, a subscribable calendar feed of
   scheduled kicks.
