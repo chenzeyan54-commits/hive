@@ -22,6 +22,20 @@ that status is the thing to check before treating a page as current behaviour:
 
 - [External workflow admission Gate 0 decision](external-workflow-admission.md) — **design only (v5).** Records the #8201 Gate 0 selection for #8302: option 2, one bounded report-only Flue generation workflow admitted through the existing contributor protocol, the v5 release line, the source-to-guarantee matrix, native Flue receipt probe, conformance split, and deferred publication boundary.
 
+- [Run artifacts](run-artifacts.md) — **shipped (v5).** How long-running runs
+  keep review state in the existing plan and lease artifacts with no new store,
+  CRD, DSL, or GitHub credential path: multi-repo wave annotations and the wave
+  barrier ([#8388](https://github.com/hivecommons/hive/pull/8388)),
+  deterministic offline finding identity
+  ([#8396](https://github.com/hivecommons/hive/pull/8396)), the receipt-chain
+  provenance guard that refuses a kick on a stale plan
+  ([#8402](https://github.com/hivecommons/hive/pull/8402)), and the
+  informational `Hive-Run`/`Hive-Plan`/`Hive-Spec` commit trailers the
+  dashboard trace resolves
+  ([#8389](https://github.com/hivecommons/hive/pull/8389)). The operator page
+  for the stage runner itself is
+  [`src/docs/spektacular.md`](../spektacular.md).
+
 - [Escalation surfaces: email and push](escalation-surfaces.md) — **partly
   shipped (v6).** Track 6 of the v6 epic (#7563): a severity-routed
   `pkg/escalate` fan-out feeding SMTP mail (immediate escalations + daily
@@ -87,6 +101,27 @@ that status is the thing to check before treating a page as current behaviour:
   implemented**, so `knowledge.curator.schedule` is accepted and defaulted but
   read by nothing. See [Knowledge curator](../knowledge-curator.md) for the
   programmatic path that does work today.
+
+- [The Tool-Approval Desk](tool-approval-desk.md) — **shipped (vertical
+  slice), default-off.** RFC [#4000](https://github.com/hivecommons/hive/issues/4000):
+  one decision point every approval-shaped request resolves through, replacing
+  four independently-grown gates with one testable function, keyed on the
+  hive's ACMM level, with operator policy expressed as data and an auditable
+  record of *why* each action was allowed or blocked.
+
+- [RFC: re-entrant conversation-as-state agent turn model](reentrant-turn-model.md)
+  — **design only / proposed (RFC [#4002](https://github.com/hivecommons/hive/issues/4002)).**
+  The original RFC text: moving agent runtime state out of persistent
+  tmux-hosted CLI processes into serialized, re-entrant turn state. Read the
+  staged follow-ups — the state inventory below, the turn-model spike, and the
+  handoff evaluation — for what has actually been investigated since.
+
+- [Agent state inventory — where in-process suspended state lives today](agent-state-inventory.md)
+  — **historical (stage 1 of RFC #4002).** Docs-only inventory of the state
+  suspended inside agent processes and tmux memory buffers, verified
+  symbol-by-symbol against `v5` at the time of writing; the first step of the
+  maintainer-agreed sequence inventory → journaled prototype → handoff
+  evaluation.
 
 - [The agent turn model and where in-process state lives](agent-turn-model.md) —
   **spike / investigation, steps 1 and 2 complete.** A cited map of how hive
